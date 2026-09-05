@@ -1,0 +1,46 @@
+# Data (fetched raw / large processed)
+data/raw/
+data/processed/
+!data/sample/
+!data/sample/**
+
+# Models & reports artifacts (keep sample reports optional)
+models/*.joblib
+models/*.pkl
+!models/.gitkeep
+# Ignore bulky prediction dumps; keep metrics docs
+reports/*.csv
+!reports/.gitkeep
+!reports/SEASONS_USED.md
+!reports/eval_report.json
+!reports/train_metrics.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Secrets / local
+.env
+*.local.yaml
+
+# Keep evaluation docs in repo
+!reports/SEASONS_USED.md
+!reports/eval_report.json
+!reports/train_metrics.json

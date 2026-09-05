@@ -1,0 +1,60 @@
+# FantasyModel default configuration
+# Documented seasons actually trained: see reports/train_metrics.json after train.
+# Target window 2016–2025; nflverse weekly 2025 returned 404 at build time → used 2016–2024.
+
+seasons:
+  target_start: 2016
+  target_end: 2025
+  # Filled/confirmed by fetch_meta.json after scripts/fetch_data.py
+  available_start: 2016
+  available_end: 2024
+  sample_years: [2022, 2023, 2024]
+
+scoring:
+  # ESPN half-PPR defaults
+  pass_yd: 0.04          # 1 pt / 25 yards
+  pass_td: 4.0
+  pass_int: -2.0
+  rush_yd: 0.1           # 1 pt / 10 yards
+  rush_td: 6.0
+  rec: 0.5               # half-PPR
+  rec_yd: 0.1
+  rec_td: 6.0
+  fumble_lost: -2.0
+  two_pt: 2.0
+  pass_300_bonus: 0.0
+  rush_100_bonus: 0.0
+  rec_100_bonus: 0.0
+
+model:
+  backend: hist_gradient_boosting  # hist_gradient_boosting | lightgbm | xgboost
+  random_state: 42
+  # Time-based split: train on seasons < test_season, test on test_season
+  test_season: 2024
+  rolling_games: 3
+  min_train_rows: 50
+  max_iter: 300
+  max_depth: 6
+  learning_rate: 0.06
+  min_samples_leaf: 25
+
+paths:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  sample_dir: data/sample
+  models_dir: models
+  reports_dir: reports
+  config: configs/default.yaml
+
+features:
+  injury_enabled: true
+  weather_enabled: true
+  travel_enabled: true
+  timezone_enabled: true
+  teammates_enabled: true
+  baselines_enabled: true
+  vegas_enabled: true
+
+espn:
+  league_id: 746996
+  scoring_profile: half_ppr
