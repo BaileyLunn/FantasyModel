@@ -18,9 +18,14 @@ Production artifacts are refit on every labelled row through the latest complete
 
 | MAE / RMSE / R² (stat-line rows, comparable to earlier versions) | half-PPR | full PPR |
 |---|---|---|
-| 2025 holdout (n=5,285) | 4.16 / 5.86 / 0.372 | 4.58 / 6.35 / 0.353 |
-| 2026 wk1–2 (n=626) | 4.37 / 6.20 / 0.358 | 4.80 / 6.72 / 0.338 |
-| Roster backtest 2026 wk1–2, all ACT players (n=904) | 3.43 / 5.24 / 0.481 | 3.78 / 5.70 / 0.478 |
+| 2025 holdout (n=5,285) | 4.16 / 5.84 / 0.377 | 4.57 / 6.32 / 0.359 |
+| 2026 wk1–2 (n=626) | 4.29 / 6.11 / 0.376 | 4.76 / 6.67 / 0.349 |
+| Roster backtest 2026 wk1–2, all ACT players (n=904) | 3.34 / 5.16 / 0.497 | 3.73 / 5.65 / 0.488 |
+
+With recency bias (2026-09-25): training sample weights decay with a 4-season half-life (`training.recency_half_life_seasons`)
+and EWMA recent-form features use a 5-game half-life (`features.ewm_halflife_games`). Before recency (same panel):
+PPR 4.58 / 6.35 / 0.353, 4.80 / 6.72 / 0.338, roster 3.78 / 5.70 / 0.478; half 4.16 / 5.86 / 0.372, 4.37 / 6.20 / 0.358,
+roster 3.43 / 5.24 / 0.481. Tuning grid and rationale: `reports/RECENCY_2026_09_25.md` (`scripts/tune_recency.py`).
 
 Before the 2026-09-25 fix pass (half-PPR): 2025 4.38 / 5.90 / 0.362; 2026 4.62 / 6.35 / 0.326; roster backtest 4.43 / 5.83 / 0.359.
 Details, ablations and the list of fixes: `reports/UPDATE_2026_W3_FIXES.md`. Earlier update: `reports/UPDATE_2026_W2.md`.
@@ -43,6 +48,8 @@ FantasyModel/
   fantasy_model/features/usage.py    # depth charts, snap counts, zero-point rows
   fantasy_model/features/history.py  # prior-weeks group aggregates (no same-week leakage)
   scripts/validate_models.py         # 2025 holdout + 2026 in-season validation per profile
+  scripts/tune_recency.py            # grid: sample-weight half-life x EWMA half-life (+ roster backtest)
+  fantasy_model/weights.py           # recency sample weights
   scripts/fetch_data.py
   scripts/update_week.py    # in-season: add week N, score, retrain, project N+1
   scripts/make_sample_data.py
@@ -95,7 +102,8 @@ python scripts/update_week.py --season 2026 --week 3
 2. scores the current production model on week N **before** refitting → `reports/oos/prod_on_2026_w3.json`
    (flagged `out_of_sample` when the model was trained through week N−1); the old artifact is kept as
    `models/fantasy_hgb_before_2026_w3.joblib`;
-3. retrains (2025 validation + full refit);
+3. retrains (2025 validation + full refit) with recency sample weights + EWMA recent-form features on by default
+   (`--recency-half-life 0 --ewm-halflife 0` turns them off for a run);
 4. projects week N+1 → `reports/projections_2026_w4_{half,ppr}.csv`.
 Steps 2–4 run for each profile in `--scoring` (default `half_ppr ppr`).
 
@@ -117,6 +125,7 @@ python -m fantasy_model --sample predict --season 2024 --week 5
 | Travel | Haversine miles team home → game stadium; `is_home` |
 | Timezone | `tz_vs_home`, `tz_vs_prev_game` (fixed US offsets; DST ignored) |
 | Teammates | Prior QB FP, backup-QB heuristic, **rolling prior** target/rush shares |
+| Recent form | EWMA (5-game half-life) of prior fantasy points, targets, carries, receptions, snap share (`fp_ewm`, …, `snap_pct_ewm`) |
 | Baselines | Opp FP allowed vs position (prior weeks), rest days, rolling/season FP, Vegas spread/total → implied team total (total/2 ± home spread/2) |
 | Usage | Depth-chart rank (pre-game), prior snap share (last / 3-game / season), games with snaps this season |
 

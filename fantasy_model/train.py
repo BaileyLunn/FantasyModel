@@ -15,6 +15,7 @@ from fantasy_model.config import load_config, model_path, profile_tag, scoring_d
 from fantasy_model.data import load_player_games
 from fantasy_model.features.pipeline import build_feature_matrix
 from fantasy_model.model import make_model, time_based_split
+from fantasy_model.weights import recency_weights, training_recency, weight_summary
 
 INTERVAL_QUANTILES = (0.10, 0.90)
 
@@ -54,6 +55,25 @@ def apply_interval(pred: np.ndarray, table: dict[str, Any] | None) -> tuple[np.n
     edges = np.array(table["edges"], dtype=float)
     b = np.clip(np.searchsorted(edges, pred, side="right") - 1, 0, len(edges) - 2)
     return pred + np.array(table["resid_lo"])[b], pred + np.array(table["resid_hi"])[b]
+
+
+def impute(X: np.ndarray, med: np.ndarray) -> np.ndarray:
+    out = np.array(X, dtype=float, copy=True)
+    inds = np.where(np.isnan(out))
+    out[inds] = np.take(med, inds[1])
+    return out
+
+
+def fit_weighted(cfg: dict[str, Any], X: np.ndarray, y: np.ndarray, season, week):
+    """Median-impute (medians from these rows) and fit with recency sample weights
+    (``training.recency_half_life_seasons``; uniform when unset). Returns (model, medians, weights)."""
+    med = np.nanmedian(X, axis=0) if len(X) else np.zeros(X.shape[1])
+    med = np.where(np.isnan(med), 0.0, med)
+    half_life, wps = training_recency(cfg)
+    w = recency_weights(season, week, half_life, wps)
+    model = make_model(cfg)
+    model.fit(impute(X, med), y, sample_weight=w)
+    return model, med, w
 
 
 def train_model(
@@ -111,21 +131,10 @@ def train_model(
     y_train = y.iloc[train_idx].to_numpy(dtype=float)
     y_test = y.iloc[test_idx].to_numpy(dtype=float)
 
-    # Impute NaNs with column medians from train only
-    med = np.nanmedian(X_train, axis=0)
-    med = np.where(np.isnan(med), 0.0, med)
-
-    def _fill(a: np.ndarray) -> np.ndarray:
-        out = a.copy()
-        inds = np.where(np.isnan(out))
-        out[inds] = np.take(med, inds[1])
-        return out
-
-    X_train = _fill(X_train)
-    X_test = _fill(X_test)
-
-    model = make_model(cfg)
-    model.fit(X_train, y_train)
+    half_life, wps = training_recency(cfg)
+    wk_all = df["week"].to_numpy() if "week" in df.columns else np.ones(len(df))
+    model, med, w_train = fit_weighted(cfg, X_train, y_train, seasons[train_idx], wk_all[train_idx])
+    X_test = impute(X_test, med)
     pred = model.predict(X_test) if len(test_idx) else np.array([])
 
     metrics: dict[str, Any] = {
@@ -138,6 +147,13 @@ def train_model(
         "n_test": int(len(test_idx)),
         "feature_cols": feature_cols,
         "seasons_in_data": sorted(map(int, np.unique(seasons))),
+        "recency": {
+            "half_life_seasons": half_life,
+            "weeks_per_season": wps,
+            "relative_mean_weight_by_season": weight_summary(seasons[train_idx], w_train),
+            "ewm_halflife_games": (cfg.get("features", {}) or {}).get("ewm_halflife_games")
+            if (cfg.get("features", {}) or {}).get("recent_form_enabled") else None,
+        },
     }
     if len(test_idx):
         metrics.update(
@@ -209,19 +225,16 @@ def train_model(
         metrics["validation_model_path"] = str(val_path)
         all_idx = np.where(labelled)[0]
         X_full_raw = X_all.iloc[all_idx][feature_cols].to_numpy(dtype=float)
-        med_full = np.nanmedian(X_full_raw, axis=0)
-        med_full = np.where(np.isnan(med_full), 0.0, med_full)
-        X_full = X_full_raw.copy()
-        inds = np.where(np.isnan(X_full))
-        X_full[inds] = np.take(med_full, inds[1])
-        full_model = make_model(cfg)
-        full_model.fit(X_full, y.iloc[all_idx].to_numpy(dtype=float))
+        full_model, med_full, w_full = fit_weighted(
+            cfg, X_full_raw, y.iloc[all_idx].to_numpy(dtype=float), seasons[all_idx], wk_all[all_idx]
+        )
         sub = df.iloc[all_idx]
         last_season = int(sub["season"].max())
         metrics["refit_full"] = {
             "n_train": int(len(all_idx)),
             "train_seasons": sorted(map(int, sub["season"].unique())),
             "last_season_weeks": sorted(map(int, sub.loc[sub["season"] == last_season, "week"].unique())),
+            "relative_mean_weight_by_season": weight_summary(seasons[all_idx], w_full),
             "note": "production artifact refit on all labelled rows; holdout metrics above come from the validation model",
         }
         artifact = {**artifact, "model": full_model, "impute_medians": med_full, "metrics": metrics}

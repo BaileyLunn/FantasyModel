@@ -15,12 +15,16 @@ Steps
  2. Score the CURRENT production model on week N before refitting (true out-of-sample,
     as long as that model was trained through week N-1) -> reports/oos/prod_{tag}_on_{S}_w{N}.json
  3. Retrain (config: validation on model.test_season, refit_full on all labelled rows).
+    Recency bias is ON by default for every profile: training sample weights decay with
+    ``training.recency_half_life_seasons`` and the recent-form EWMA features use
+    ``features.ewm_halflife_games`` (override with --recency-half-life / --ewm-halflife; 0 = off).
  4. Project week N+1 -> reports/projections_{S}_w{N+1}_{tag}.csv  (tag = half | ppr | std)
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import shutil
 import sys
@@ -39,6 +43,20 @@ from fantasy_model.project import project_week
 from fantasy_model.train import train_model
 
 
+def apply_recency_overrides(cfg: dict, half_life: float | None, ewm: float | None) -> dict:
+    """Recency weighting / EWMA come from the config (on by default); CLI values override."""
+    cfg = copy.deepcopy(cfg)
+    tr = cfg.setdefault("training", {})
+    feats = cfg.setdefault("features", {})
+    if half_life is not None:
+        tr["recency_half_life_seasons"] = half_life if half_life > 0 else None
+    if ewm is not None:
+        feats["recent_form_enabled"] = ewm > 0
+        if ewm > 0:
+            feats["ewm_halflife_games"] = ewm
+    return cfg
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--season", type=int, required=True)
@@ -51,10 +69,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-project", action="store_true")
     p.add_argument("--scoring", nargs="+", default=["half_ppr", "ppr"],
                    help="Scoring profiles to score/retrain/project (default: half_ppr ppr)")
+    p.add_argument("--recency-half-life", type=float, default=None,
+                   help="Override training.recency_half_life_seasons (0 = uniform weights)")
+    p.add_argument("--ewm-halflife", type=float, default=None,
+                   help="Override features.ewm_halflife_games (0 = recent-form EWMA features off)")
     p.add_argument("--allow-partial", action="store_true", help="Proceed even if some week-N games are not in the stats yet")
     args = p.parse_args(argv)
 
-    cfg = load_config(args.config)
+    cfg = apply_recency_overrides(load_config(args.config), args.recency_half_life, args.ewm_halflife)
     S, N = args.season, args.week
     seasons = [str(y) for y in range(args.first_season, S + 1)]
     fetch_args = ["--seasons", *seasons, "--max-week", f"{S}:{N}"]
@@ -64,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
         fetch_args.append("--skip-download")
     elif not args.refresh_all:
         fetch_args += ["--refresh-seasons", str(S)]
+    if args.ewm_halflife:
+        fetch_args += ["--ewm-halflife", str(args.ewm_halflife)]
     rc = fetch_data.main(fetch_args)
     if rc:
         return rc
@@ -87,7 +111,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 3
 
-    summary: dict = {"season": S, "week": N, "week_rows": wk_meta, "profiles": {}}
+    summary: dict = {"season": S, "week": N, "week_rows": wk_meta, "profiles": {},
+                     "recency": {"half_life_seasons": cfg["training"].get("recency_half_life_seasons"),
+                                 "ewm_halflife_games": cfg["features"].get("ewm_halflife_games")
+                                 if cfg["features"].get("recent_form_enabled") else None}}
+    print(f"recency settings: {summary['recency']}")
     reports = Path(cfg["paths"]["reports_dir"])
     base_cfg = cfg
     for prof in args.scoring:
