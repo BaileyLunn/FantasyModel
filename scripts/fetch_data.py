@@ -38,6 +38,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--config", default=None)
     p.add_argument("--seasons", nargs="*", type=int, default=None, help="Seasons to include in the panel")
     p.add_argument("--max-seasons", type=int, default=None, help="Keep only the N most recent requested seasons")
+    p.add_argument("--ewm-halflife", type=float, default=None,
+                   help="Override features.ewm_halflife_games for the panel's snap_pct_ewm column")
     p.add_argument("--skip-download", action="store_true", help="Rebuild processed from existing raw CSVs")
     p.add_argument(
         "--refresh-seasons", nargs="*", type=int, default=None,
@@ -157,7 +159,8 @@ def main(argv: list[str] | None = None) -> int:
     injuries = pd.read_csv(inj_path, low_memory=False) if inj_path.exists() else None
 
     panel = build_panel(weekly, schedules, injuries, scoring_dict(cfg), raw_dir=str(raw_dir),
-                        add_zero_stat_rows=bool(cfg.get("features", {}).get("zero_stat_rows", True)))
+                        add_zero_stat_rows=bool(cfg.get("features", {}).get("zero_stat_rows", True)),
+                        snap_ewm_halflife=args.ewm_halflife if args.ewm_halflife else cfg.get("features", {}).get("ewm_halflife_games"))
 
     out_csv = processed_dir / "player_games.csv"
     panel.to_csv(out_csv, index=False)

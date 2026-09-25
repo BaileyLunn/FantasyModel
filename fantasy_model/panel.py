@@ -71,6 +71,7 @@ def build_panel(
     scoring: Mapping[str, float],
     raw_dir: str | None = None,
     add_zero_stat_rows: bool = False,
+    snap_ewm_halflife: float | None = None,
 ) -> pd.DataFrame:
     """Join weekly player rows to schedule + injuries; REG season skill positions only.
 
@@ -135,5 +136,5 @@ def build_panel(
     if raw_dir is not None:
         from fantasy_model.features.usage import add_usage_context
 
-        panel = add_usage_context(panel, raw_dir, schedules)
+        panel = add_usage_context(panel, raw_dir, schedules, snap_ewm_halflife=snap_ewm_halflife)
     return panel

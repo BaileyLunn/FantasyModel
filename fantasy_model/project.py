@@ -97,6 +97,62 @@ def local_drivers(model, X: np.ndarray, reference: np.ndarray, feature_cols: lis
     return out
 
 
+def projection_features(
+    season: int,
+    week: int,
+    cfg: dict[str, Any],
+    refresh_roster: bool = True,
+    hist: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Build forward rows for (season, week) and their leakage-safe features.
+
+    Returns (hist_before_week, projection_rows, projection_feature_rows). ``hist`` defaults to the
+    processed panel; only rows strictly before the projected week are used.
+    """
+    scoring = scoring_dict(cfg)
+    raw_dir = Path(cfg["paths"]["raw_dir"])
+    if hist is None:
+        hist, _ = load_player_games(cfg)
+    hist = hist[(hist["season"] < season) | ((hist["season"] == season) & (hist["week"] < week))].copy()
+    hist["is_projection"] = 0
+
+    schedules = pd.read_csv(raw_dir / "schedules.csv", low_memory=False)
+    inj_path = raw_dir / "injuries.csv"
+    injuries = pd.read_csv(inj_path, low_memory=False) if inj_path.exists() else None
+    fwd = forward_rows(_roster(cfg, season, refresh_roster), schedules, season, week)
+    fwd_panel = build_panel(fwd, schedules, injuries, scoring, raw_dir=str(raw_dir),
+                            snap_ewm_halflife=cfg.get("features", {}).get("ewm_halflife_games"))
+
+    df = pd.concat([hist, fwd_panel], ignore_index=True, sort=False)
+    X_all, _, _ = build_feature_matrix(df, scoring, cfg)
+    proj_mask = df["is_projection"].fillna(0).astype(int).eq(1).to_numpy()
+    return hist, df.loc[proj_mask].copy(), X_all.loc[proj_mask]
+
+
+def ruled_out_mask(out: pd.DataFrame) -> pd.Series:
+    status = out.get("injury_status", pd.Series("", index=out.index)).fillna("").astype(str).str.strip().str.lower()
+    return status.isin(RULED_OUT)
+
+
+def actual_points(out: pd.DataFrame, raw_dir: Path, season: int, week: int, scoring: dict[str, float]) -> tuple[pd.Series, pd.Series]:
+    """(actual_fp, game_played) for projection rows from the raw weekly stats; active players with no
+    stat line in a completed game get 0."""
+    game_played = pd.Series(False, index=out.index)
+    actual = pd.Series(np.nan, index=out.index)
+    wk_path = Path(raw_dir) / "weekly.csv"
+    if wk_path.exists():
+        wk = pd.read_csv(wk_path, low_memory=False)
+        wk = wk[(wk["season"] == season) & (wk["week"] == week)].copy()
+        if not wk.empty:
+            wk = wk.assign(actual_fp=fantasy_points(wk, scoring).round(2))
+            played_teams = set(normalize_team_series(wk["recent_team"]).dropna())
+            game_played = out["team"].isin(played_teams)
+            act = wk.drop_duplicates("player_id").set_index("player_id")["actual_fp"]
+            actual = out["player_id"].map(act)
+            actual[game_played & actual.isna()] = 0.0
+    return actual, game_played
+
+
 def project_week(
     season: int,
     week: int,
@@ -113,32 +169,19 @@ def project_week(
     path = Path(model_path) if model_path else default_model_path(cfg)
     artifact = joblib.load(path)
 
-    hist, _ = load_player_games(cfg)
-    hist = hist[(hist["season"] < season) | ((hist["season"] == season) & (hist["week"] < week))].copy()
-    hist["is_projection"] = 0
-
-    schedules = pd.read_csv(raw_dir / "schedules.csv", low_memory=False)
-    inj_path = raw_dir / "injuries.csv"
-    injuries = pd.read_csv(inj_path, low_memory=False) if inj_path.exists() else None
-    fwd = forward_rows(_roster(cfg, season, refresh_roster), schedules, season, week)
-    fwd_panel = build_panel(fwd, schedules, injuries, scoring, raw_dir=str(raw_dir))
-
-    df = pd.concat([hist, fwd_panel], ignore_index=True, sort=False)
-    X_all, _, _ = build_feature_matrix(df, scoring, cfg)
-    proj_mask = df["is_projection"].fillna(0).astype(int).eq(1).to_numpy()
+    hist, out, feats = projection_features(season, week, cfg, refresh_roster=refresh_roster)
     feature_cols = artifact["feature_cols"]
-    X = X_all.loc[proj_mask, feature_cols].to_numpy(dtype=float)
+    X = feats[feature_cols].to_numpy(dtype=float)
     inds = np.where(np.isnan(X))
     X[inds] = np.take(artifact["impute_medians"], inds[1])
     preds = artifact["model"].predict(X)
     lo, hi = apply_interval(preds, artifact.get("interval"))
 
-    out = df.loc[proj_mask].copy()
     out["model_projection"] = np.round(preds, 2)
     out["low_80"] = np.round(lo, 2)
     out["high_80"] = np.round(hi, 2)
-    feats = X_all.loc[proj_mask]
-    for c in ("is_home", "implied_team_total", "depth_rank_filled", "snap_pct_last", "snap_pct_roll3", "snap_pct_season"):
+    for c in ("is_home", "implied_team_total", "depth_rank_filled", "snap_pct_last", "snap_pct_roll3", "snap_pct_season",
+              "snap_pct_ewm", "fp_roll", "fp_ewm"):
         out[c] = feats[c].to_numpy() if c in feats else np.nan
     out["depth_rank"] = pd.to_numeric(out.get("depth_rank"), errors="coerce")
     prior = hist.groupby("player_id").size()
@@ -149,8 +192,7 @@ def project_week(
 
     # The model never sees ruled-out players (they have no played-game rows), so it cannot learn
     # "Out". Rows are kept; projection is set to 0 when the nflverse report says Out/IR.
-    status = out.get("injury_status", pd.Series("", index=out.index)).fillna("").astype(str).str.strip().str.lower()
-    ruled_out = status.isin(RULED_OUT)
+    ruled_out = ruled_out_mask(out)
     out["projection"] = out["model_projection"].where(~ruled_out, 0.0)
     out.loc[ruled_out, ["low_80", "high_80"]] = 0.0
     out["availability_note"] = np.where(ruled_out, "ruled out on nflverse injury report -> 0", "")
@@ -158,28 +200,15 @@ def project_week(
         out["top_drivers"] = local_drivers(artifact["model"], X, artifact["impute_medians"], feature_cols)
 
     # Attach actual points for games of this week already played (if published)
-    game_played = pd.Series(False, index=out.index)
-    out["actual_fp"] = np.nan
-    wk_path = raw_dir / "weekly.csv"
-    if wk_path.exists():
-        wk = pd.read_csv(wk_path, low_memory=False)
-        wk = wk[(wk["season"] == season) & (wk["week"] == week)].copy()
-        if not wk.empty:
-            wk = wk.assign(actual_fp=fantasy_points(wk, scoring).round(2))
-            played_teams = set(normalize_team_series(wk["recent_team"]).dropna())
-            game_played = out["team"].isin(played_teams)
-            act = wk.drop_duplicates("player_id").set_index("player_id")["actual_fp"]
-            out["actual_fp"] = out["player_id"].map(act)
-            # Active but no offensive stats in a completed game -> 0 points
-            out.loc[game_played & out["actual_fp"].isna(), "actual_fp"] = 0.0
+    out["actual_fp"], game_played = actual_points(out, raw_dir, season, week, scoring)
     out["game_status"] = np.where(game_played, "played", "upcoming")
     out["scoring_profile"] = artifact.get("scoring_profile", profile_tag(cfg))
 
     cols = [
         "season", "week", "game_id", "gameday", "player_id", "player_name", "position", "team",
         "opponent_team", "is_home", "spread_line", "total_line", "implied_team_total",
-        "depth_rank", "likely_role", "snap_pct_last", "snap_pct_roll3", "snap_pct_season",
-        "injury_status", "injury_type", "n_prior_games", "n_prior_games_this_season",
+        "depth_rank", "likely_role", "snap_pct_last", "snap_pct_roll3", "snap_pct_season", "snap_pct_ewm",
+        "fp_roll", "fp_ewm", "injury_status", "injury_type", "n_prior_games", "n_prior_games_this_season",
         "projection", "low_80", "high_80", "model_projection", "availability_note",
         "game_status", "actual_fp", "scoring_profile", "top_drivers",
     ]

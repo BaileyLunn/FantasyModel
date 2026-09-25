@@ -49,7 +49,48 @@ FEATURE_COLUMNS = [
     "snap_pct_season",
     "snap_games_season",
     "has_snap_history",
+    # recent form: exponentially weighted means of prior games (features.recent_form_enabled)
+    "fp_ewm",
+    "targets_ewm",
+    "carries_ewm",
+    "rec_ewm",
+    "snap_pct_ewm",
 ]
+
+RECENT_FORM_COLUMNS = ["fp_ewm", "targets_ewm", "carries_ewm", "rec_ewm", "snap_pct_ewm"]
+_EWM_SOURCES = {"fp_ewm": "fantasy_points", "targets_ewm": "targets", "carries_ewm": "carries", "rec_ewm": "receptions"}
+
+
+def add_recent_form_features(out: pd.DataFrame, halflife_games: float = 5.0) -> pd.DataFrame:
+    """EWMA of a player's PRIOR games (fantasy points, targets, carries, receptions).
+
+    ``shift(1)`` inside each player's time-ordered history, then ``ewm(halflife, ignore_na=True)``:
+    a row only sees games strictly before it (one row per player-week), across season boundaries.
+    Zero-stat rows (0-point appearances / rostered-no-snap) count as 0 usage; unlabelled projection
+    rows are skipped (NaN). Players with no prior games get 0, like ``fp_roll``.
+    """
+    out = out.copy()
+    if "player_id" not in out.columns:
+        for c in _EWM_SOURCES:
+            out[c] = 0.0
+        return out
+    sort_cols = [c for c in ("season", "week", "_row_id") if c in out.columns]
+    order = out.sort_values(sort_cols).index if sort_cols else out.index
+    srt = out.loc[order]
+    zero = pd.to_numeric(srt.get("zero_stat_appearance"), errors="coerce").fillna(0).eq(1) \
+        if "zero_stat_appearance" in srt.columns else pd.Series(False, index=srt.index)
+    pid = srt["player_id"]
+    for col, src in _EWM_SOURCES.items():
+        if src not in srt.columns:
+            out[col] = 0.0
+            continue
+        v = pd.to_numeric(srt[src], errors="coerce")
+        if src != "fantasy_points":
+            v = v.mask(zero & v.isna(), 0.0)
+        prev = v.groupby(pid, sort=False).shift(1)
+        ew = prev.groupby(pid, sort=False).transform(lambda x: x.ewm(halflife=halflife_games, ignore_na=True).mean())
+        out[col] = ew.reindex(out.index).fillna(0.0)
+    return out
 
 UNLISTED_DEPTH_RANK = 9  # players absent from the depth chart are treated as deep reserves
 
@@ -63,7 +104,7 @@ def add_usage_features(out: pd.DataFrame) -> pd.DataFrame:
     out["depth_rank_filled"] = dr.clip(upper=UNLISTED_DEPTH_RANK).fillna(UNLISTED_DEPTH_RANK)
     last = pd.to_numeric(out.get("snap_pct_last"), errors="coerce") if "snap_pct_last" in out.columns else pd.Series(float("nan"), index=out.index)
     out["has_snap_history"] = last.notna().astype(int)
-    for c in ("snap_pct_last", "snap_pct_roll3", "snap_pct_season", "snap_games_season"):
+    for c in ("snap_pct_last", "snap_pct_roll3", "snap_pct_season", "snap_games_season", "snap_pct_ewm"):
         vals = pd.to_numeric(out[c], errors="coerce") if c in out.columns else pd.Series(float("nan"), index=out.index)
         out[c] = vals.fillna(0.0)
     return out
@@ -104,6 +145,9 @@ def build_feature_matrix(
         out = add_baseline_features(out, rolling_games=rolling)
     if feat_cfg.get("usage_enabled", True):
         out = add_usage_features(out)
+    recent_form = bool(feat_cfg.get("recent_form_enabled", False))
+    if recent_form:
+        out = add_recent_form_features(out, float(feat_cfg.get("ewm_halflife_games", 5.0)))
 
     # Restore input order after sorts/merges inside feature helpers
     if "_row_id" not in out.columns:
@@ -123,7 +167,7 @@ def build_feature_matrix(
     else:
         out["position_code"] = 0
 
-    feature_cols = [c for c in FEATURE_COLUMNS if c in out.columns]
+    feature_cols = [c for c in FEATURE_COLUMNS if c in out.columns and (recent_form or c not in RECENT_FORM_COLUMNS)]
     feature_cols.append("position_code")
     seen: set[str] = set()
     feature_cols = [c for c in feature_cols if not (c in seen or seen.add(c))]

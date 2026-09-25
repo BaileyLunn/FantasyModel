@@ -18,6 +18,8 @@ Output columns attached to the panel (all known before kickoff of the row's game
   previous 3 games the player appeared in (0 for special-teams-only appearances).
 * ``snap_pct_season`` — mean prior offensive snap share this season (NaN before first appearance).
 * ``snap_games_season`` — prior games this season with a snap-count row (a proxy for being active).
+* ``snap_pct_ewm`` — exponentially weighted mean of prior offensive snap shares (half-life in games,
+  ``features.ewm_halflife_games``; crosses season boundaries like ``snap_pct_roll3``).
 """
 
 from __future__ import annotations
@@ -36,7 +38,8 @@ ROSTER_URL = NFLVERSE_RELEASES + "/weekly_rosters/roster_weekly_{season}.parquet
 PLAYERS_URL = NFLVERSE_RELEASES + "/players/players.parquet"
 
 SKILL = ["QB", "RB", "WR", "TE"]
-USAGE_COLUMNS = ["depth_rank", "snap_pct_last", "snap_pct_roll3", "snap_pct_season", "snap_games_season"]
+USAGE_COLUMNS = ["depth_rank", "snap_pct_last", "snap_pct_roll3", "snap_pct_season", "snap_games_season", "snap_pct_ewm"]
+DEFAULT_EWM_HALFLIFE_GAMES = 5.0  # keep in sync with configs/default.yaml features.ewm_halflife_games
 
 
 def extra_dir(raw_dir: str | Path) -> Path:
@@ -153,8 +156,10 @@ def load_snaps(raw_dir: str | Path, seasons: list[int]) -> pd.DataFrame:
     return s[["player_id", "season", "week", "team", "offense_snaps", "offense_pct"]].reset_index(drop=True)
 
 
-def prior_snap_features(snaps: pd.DataFrame, keys: pd.DataFrame) -> pd.DataFrame:
+def prior_snap_features(snaps: pd.DataFrame, keys: pd.DataFrame,
+                        ewm_halflife: float | None = DEFAULT_EWM_HALFLIFE_GAMES) -> pd.DataFrame:
     """For each (player_id, season, week) in ``keys``: snap-share summaries of games strictly before it."""
+    ewm_halflife = DEFAULT_EWM_HALFLIFE_GAMES if ewm_halflife is None else float(ewm_halflife)
     keys = keys[["player_id", "season", "week"]].drop_duplicates().copy()
     if snaps.empty:
         for c in USAGE_COLUMNS[1:]:
@@ -164,6 +169,8 @@ def prior_snap_features(snaps: pd.DataFrame, keys: pd.DataFrame) -> pd.DataFrame
     g = s.groupby("player_id")["offense_pct"]
     s["snap_pct_last"] = s["offense_pct"]
     s["snap_pct_roll3"] = g.transform(lambda x: x.rolling(3, min_periods=1).mean())
+    # EWMA through (and including) each snap game; the as-of join below only exposes it to later weeks
+    s["snap_pct_ewm"] = g.transform(lambda x: x.ewm(halflife=ewm_halflife, ignore_na=True).mean())
     gs = s.groupby(["player_id", "season"])["offense_pct"]
     s["snap_pct_season"] = gs.transform(lambda x: x.expanding().mean())
     s["snap_games_season"] = gs.cumcount() + 1
@@ -173,7 +180,7 @@ def prior_snap_features(snaps: pd.DataFrame, keys: pd.DataFrame) -> pd.DataFrame
     keys["player_id"] = keys["player_id"].astype(str)
     # as-of join: latest snap game with _t strictly less than the row's _t
     left = keys.sort_values("_t")
-    right = s[["player_id", "_t", "season", "snap_pct_last", "snap_pct_roll3", "snap_pct_season", "snap_games_season"]] \
+    right = s[["player_id", "_t", "season", "snap_pct_last", "snap_pct_roll3", "snap_pct_season", "snap_games_season", "snap_pct_ewm"]] \
         .rename(columns={"season": "_snap_season"}).sort_values("_t")
     m = pd.merge_asof(left, right, on="_t", by="player_id", direction="backward", allow_exact_matches=False)
     other_season = m["_snap_season"] != m["season"]
@@ -183,7 +190,8 @@ def prior_snap_features(snaps: pd.DataFrame, keys: pd.DataFrame) -> pd.DataFrame
     return m.drop(columns=["_t", "_snap_season"])
 
 
-def add_usage_context(panel: pd.DataFrame, raw_dir: str | Path, schedules: pd.DataFrame | None) -> pd.DataFrame:
+def add_usage_context(panel: pd.DataFrame, raw_dir: str | Path, schedules: pd.DataFrame | None,
+                      snap_ewm_halflife: float | None = None) -> pd.DataFrame:
     """Attach depth_rank + prior snap-share columns to a player-game panel (in place of any old ones)."""
     out = panel.drop(columns=[c for c in USAGE_COLUMNS if c in panel.columns])
     if out.empty or "player_id" not in out.columns:
@@ -194,7 +202,7 @@ def add_usage_context(panel: pd.DataFrame, raw_dir: str | Path, schedules: pd.Da
     seasons = sorted(map(int, pd.to_numeric(out["season"], errors="coerce").dropna().unique()))
     snap_seasons = list(range(min(seasons) - 1, max(seasons) + 1))
     snaps = load_snaps(raw_dir, snap_seasons)
-    feats = prior_snap_features(snaps, out)
+    feats = prior_snap_features(snaps, out, ewm_halflife=snap_ewm_halflife)
     out = out.merge(feats, on=["player_id", "season", "week"], how="left")
     sched = schedules if schedules is not None else pd.DataFrame()
     depth = load_depth_ranks(raw_dir, sched, seasons) if not sched.empty else pd.DataFrame()
