@@ -59,6 +59,13 @@
     "carries_ewm",
     "rec_ewm",
     "snap_pct_ewm",
+    "rush_share_ewm",
+    "rush_yds_ewm",
+    "target_share_ewm",
+    "air_yards_share_ewm",
+    "rec_air_yards_ewm",
+    "pass_att_ewm",
+    "pass_air_yards_ewm",
     "position_code"
   ],
   "seasons_in_data": [
@@ -90,22 +97,22 @@
     },
     "ewm_halflife_games": 5
   },
-  "mae": 3.3760689135167787,
-  "rmse": 5.164861857969521,
-  "r2": 0.5182580076471541,
+  "mae": 3.3758688689186735,
+  "rmse": 5.145233998456651,
+  "r2": 0.5219125477172306,
   "mean_actual": 5.214378567268491,
-  "mean_pred": 5.377448821485737,
+  "mean_pred": 5.388039582173777,
   "stats_rows_only": {
     "n": 5285,
-    "mae": 4.565794390795014,
-    "rmse": 6.32265216118194,
-    "r2": 0.35906191912583973,
+    "mae": 4.552854211646747,
+    "rmse": 6.29430819384416,
+    "r2": 0.36479559149615737,
     "by_position": {
       "QB": {
         "n": 664,
-        "mae": 6.0145692446707075,
-        "rmse": 7.922635042452558,
-        "r2": 0.28752144208103647
+        "mae": 5.911573993468017,
+        "rmse": 7.740915312826419,
+        "r2": 0.31983053663093186
       },
       "RB": {
         "n": 1360,
@@ -132,9 +139,9 @@
   "by_position": {
     "QB": {
       "n": 1359,
-      "mae": 3.715461300557397,
-      "rmse": 5.851771157128676,
-      "r2": 0.6091749728966211
+      "mae": 3.714197589832797,
+      "rmse": 5.741502932300461,
+      "r2": 0.6237652716730393
     },
     "RB": {
       "n": 2024,
@@ -166,7 +173,7 @@
     2023,
     2024
   ],
-  "interval_holdout_coverage": 0.7996505532906232,
+  "interval_holdout_coverage": 0.7949912638322656,
   "validation_model_path": "/workspace/FantasyModel/models/fantasy_hgb_ppr_val.joblib",
   "refit_full": {
     "n_train": 83685,

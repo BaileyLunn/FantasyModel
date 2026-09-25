@@ -18,9 +18,15 @@ Production artifacts are refit on every labelled row through the latest complete
 
 | MAE / RMSE / R² (stat-line rows, comparable to earlier versions) | half-PPR | full PPR |
 |---|---|---|
-| 2025 holdout (n=5,285) | 4.16 / 5.84 / 0.377 | 4.57 / 6.32 / 0.359 |
-| 2026 wk1–2 (n=626) | 4.29 / 6.11 / 0.376 | 4.76 / 6.67 / 0.349 |
-| Roster backtest 2026 wk1–2, all ACT players (n=904) | 3.34 / 5.16 / 0.497 | 3.73 / 5.65 / 0.488 |
+| 2025 holdout (n=5,285) | 4.15 / 5.81 / 0.383 | 4.55 / 6.29 / 0.365 |
+| 2026 wk1–2 (n=626) | 4.30 / 6.14 / 0.369 | 4.77 / 6.69 / 0.345 |
+| Roster backtest 2026 wk1–2, all ACT players (n=904; 5-seed mean) | 3.32 / 5.16 / 0.497 | 3.73 / 5.67 / 0.484 |
+
+**Per-position models (2026-09-25):** QB now has its own model with position-specific features (rush share, pass volume, air yards, ...).
+RB/WR/TE stay on the pooled model (`model.strategy: hybrid`, `model.per_position`). QB beat pooled on the 2024 inner validation and on the 2025 holdout
+beyond seed noise (PPR QB RMSE 5.831 → 5.776, MAE 3.763 → 3.745). On 2026 wk1–2 (only 180 QB rows) RMSE was slightly higher, within noise, and MAE lower.
+It is a marginal gain; full tables are in `reports/PER_POSITION_2026_09_25.md` (`scripts/per_position_experiment.py`). Before (pooled only):
+PPR 4.57 / 6.32 / 0.359, 4.76 / 6.67 / 0.349, roster 3.75 / 5.66 / 0.486 (5-seed); half 4.16 / 5.84 / 0.377, 4.29 / 6.11 / 0.376, roster 3.34 / 5.15 / 0.500.
 
 With recency bias (2026-09-25): training sample weights decay with a 4-season half-life (`training.recency_half_life_seasons`)
 and EWMA recent-form features use a 5-game half-life (`features.ewm_halflife_games`). Before recency (same panel):
@@ -49,6 +55,7 @@ FantasyModel/
   fantasy_model/features/history.py  # prior-weeks group aggregates (no same-week leakage)
   scripts/validate_models.py         # 2025 holdout + 2026 in-season validation per profile
   scripts/tune_recency.py            # grid: sample-weight half-life x EWMA half-life (+ roster backtest)
+  scripts/per_position_experiment.py # pooled vs per-position vs hybrid (+ position features), 5 seeds, 3 checks
   fantasy_model/weights.py           # recency sample weights
   scripts/fetch_data.py
   scripts/update_week.py    # in-season: add week N, score, retrain, project N+1
@@ -128,8 +135,16 @@ python -m fantasy_model --sample predict --season 2024 --week 5
 | Recent form | EWMA (5-game half-life) of prior fantasy points, targets, carries, receptions, snap share (`fp_ewm`, …, `snap_pct_ewm`) |
 | Baselines | Opp FP allowed vs position (prior weeks), rest days, rolling/season FP, Vegas spread/total → implied team total (total/2 ± home spread/2) |
 | Usage | Depth-chart rank (pre-game), prior snap share (last / 3-game / season), games with snaps this season |
+| Position-specific (per-position models only) | EWMA of prior rush share, rush yds, target share, air-yards share, receiving air yards, pass attempts, pass air yards |
 
 Model: `HistGradientBoostingRegressor` (optional `lightgbm` / `xgboost` via config).
+
+Strategy (`model.strategy`): `pooled` = one model with `position_code` as a feature; `per_position` = one model per position;
+`hybrid` = positions flagged in `model.per_position` get their own model (hyper-parameters in `model.position_params`, which can be per scoring profile)
+and the rest use the pooled model. Default: hybrid with QB separate. Artifacts hold a `PositionRouterModel` (`fantasy_model/model.py`) that routes rows by
+position, so `evaluate`, `predict`, `project`, `top_drivers` and `update_week.py` work unchanged. Projection 80% ranges use per-position residual tables.
+Override for one run: `python -m fantasy_model --per-position none|all|QB,TE train`, or `scripts/update_week.py ... --per-position none`.
+Position-specific features (`features.position_specific_enabled`) feed only the per-position models.
 
 ## Tests
 
@@ -137,7 +152,7 @@ Model: `HistGradientBoostingRegressor` (optional `lightgbm` / `xgboost` via conf
 pytest -q
 ```
 
-Dome weather nulling, timezone deltas, travel distance (incl. Oakland/San Diego venues), scoring profiles, stats_player harmonization, projection-row labels, forward roster rows, Vegas implied-total sign, team-code normalization, same-week leakage guards, depth/snap as-of joins, zero-point rows, residual intervals (`tests/test_fixes_2026_09_25.py`).
+Dome weather nulling, timezone deltas, travel distance (incl. Oakland/San Diego venues), scoring profiles, stats_player harmonization, projection-row labels, forward roster rows, Vegas implied-total sign, team-code normalization, same-week leakage guards, depth/snap as-of joins, zero-point rows, residual intervals (`tests/test_fixes_2026_09_25.py`), per-position strategy / router / per-position intervals / position-specific features (`tests/test_per_position.py`).
 
 ## Known gaps
 

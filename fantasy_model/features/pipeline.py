@@ -92,6 +92,64 @@ def add_recent_form_features(out: pd.DataFrame, halflife_games: float = 5.0) -> 
         out[col] = ew.reindex(out.index).fillna(0.0)
     return out
 
+# Position-specific usage (features.position_specific_enabled): EWMA of PRIOR games of role stats that
+# matter for one position more than others (QB rushing share, RB/WR/TE target + air-yards share, QB
+# passing volume). Same shift(1) + ewm(halflife) scheme as the recent-form features.
+POSITION_SPECIFIC_COLUMNS = [
+    "rush_share_ewm",        # player carries / team carries (QB designed-run share, RB workload)
+    "rush_yds_ewm",          # QB rushing production
+    "target_share_ewm",      # player targets / team targets (RB/WR/TE)
+    "air_yards_share_ewm",   # share of team air yards (WR/TE)
+    "rec_air_yards_ewm",
+    "pass_att_ewm",          # QB passing volume
+    "pass_air_yards_ewm",
+]
+
+
+def add_position_specific_features(out: pd.DataFrame, halflife_games: float = 5.0) -> pd.DataFrame:
+    """EWMA of a player's prior-game role stats. Team shares are computed within each team-game from the
+    labelled rows (skill positions only), so a row never sees its own game. Labelled rows with no value
+    (e.g. no targets) count as 0; unlabelled projection rows are skipped. No prior games -> 0."""
+    out = out.copy()
+    need = {"player_id", "season", "week"}
+    if not need.issubset(out.columns):
+        for c in POSITION_SPECIFIC_COLUMNS:
+            out[c] = 0.0
+        return out
+    team_col = "team" if "team" in out.columns else "recent_team"
+    fp = pd.to_numeric(out.get("fantasy_points"), errors="coerce") if "fantasy_points" in out.columns else pd.Series(0.0, index=out.index)
+    labelled = fp.notna()
+
+    def num(c):
+        v = pd.to_numeric(out[c], errors="coerce") if c in out.columns else pd.Series(float("nan"), index=out.index)
+        return v.where(~labelled, v.fillna(0.0))
+
+    carries, targets, rec_air = num("carries"), num("targets"), num("receiving_air_yards")
+    keys = [out[team_col], out["season"], out["week"]] if team_col in out.columns else [out["season"], out["week"]]
+
+    def share(v):
+        tot = v.where(labelled, 0.0).groupby(keys).transform("sum")
+        return (v / tot.where(tot > 0)).where(labelled, float("nan")).where(~labelled | (tot > 0), 0.0)
+
+    src = {
+        "rush_share_ewm": share(carries),
+        "rush_yds_ewm": num("rushing_yards"),
+        "target_share_ewm": share(targets),
+        "air_yards_share_ewm": share(rec_air.clip(lower=0)),
+        "rec_air_yards_ewm": rec_air,
+        "pass_att_ewm": num("attempts"),
+        "pass_air_yards_ewm": num("passing_air_yards"),
+    }
+    sort_cols = [c for c in ("season", "week", "_row_id") if c in out.columns]
+    order = out.sort_values(sort_cols).index
+    pid = out.loc[order, "player_id"]
+    for col, v in src.items():
+        prev = v.loc[order].groupby(pid, sort=False).shift(1)
+        ew = prev.groupby(pid, sort=False).transform(lambda x: x.ewm(halflife=halflife_games, ignore_na=True).mean())
+        out[col] = ew.reindex(out.index).fillna(0.0)
+    return out
+
+
 UNLISTED_DEPTH_RANK = 9  # players absent from the depth chart are treated as deep reserves
 
 
@@ -148,6 +206,9 @@ def build_feature_matrix(
     recent_form = bool(feat_cfg.get("recent_form_enabled", False))
     if recent_form:
         out = add_recent_form_features(out, float(feat_cfg.get("ewm_halflife_games", 5.0)))
+    pos_specific = bool(feat_cfg.get("position_specific_enabled", False))
+    if pos_specific:
+        out = add_position_specific_features(out, float(feat_cfg.get("ewm_halflife_games", 5.0)))
 
     # Restore input order after sorts/merges inside feature helpers
     if "_row_id" not in out.columns:
@@ -162,12 +223,14 @@ def build_feature_matrix(
     if "position" in out.columns:
         # Stable codes independent of row order
         pos = out["position"].astype(str).str.upper()
-        mapping = {p: i for i, p in enumerate(["QB", "RB", "TE", "WR"])}
+        from fantasy_model.model import POSITION_CODES as mapping  # QB 0, RB 1, TE 2, WR 3
         out["position_code"] = pos.map(mapping).fillna(-1).astype(int)
     else:
         out["position_code"] = 0
 
     feature_cols = [c for c in FEATURE_COLUMNS if c in out.columns and (recent_form or c not in RECENT_FORM_COLUMNS)]
+    if pos_specific:
+        feature_cols += [c for c in POSITION_SPECIFIC_COLUMNS if c in out.columns]
     feature_cols.append("position_code")
     seen: set[str] = set()
     feature_cols = [c for c in feature_cols if not (c in seen or seen.add(c))]

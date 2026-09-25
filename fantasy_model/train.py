@@ -14,7 +14,9 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from fantasy_model.config import load_config, model_path, profile_tag, scoring_dict, scoring_profile
 from fantasy_model.data import load_player_games
 from fantasy_model.features.pipeline import build_feature_matrix
-from fantasy_model.model import make_model, time_based_split
+from fantasy_model.model import (
+    POSITION_CODES, PositionRouterModel, make_model, per_position_flags, position_cfg, time_based_split,
+)
 from fantasy_model.weights import recency_weights, training_recency, weight_summary
 
 INTERVAL_QUANTILES = (0.10, 0.90)
@@ -48,10 +50,21 @@ def residual_interval_table(pred: np.ndarray, actual: np.ndarray, n_bins: int = 
     }
 
 
-def apply_interval(pred: np.ndarray, table: dict[str, Any] | None) -> tuple[np.ndarray, np.ndarray]:
+def apply_interval(pred: np.ndarray, table: dict[str, Any] | None, positions=None) -> tuple[np.ndarray, np.ndarray]:
+    """low/high = pred + binned residual quantiles. With ``positions`` and a table that has
+    ``by_position`` sub-tables, each row uses its position's table (pooled table as fallback)."""
     pred = np.asarray(pred, dtype=float)
     if not table:
         return np.full_like(pred, np.nan), np.full_like(pred, np.nan)
+    by = table.get("by_position") or {}
+    if positions is not None and by:
+        pos = np.asarray(positions).astype(str)
+        lo, hi = apply_interval(pred, {k: v for k, v in table.items() if k != "by_position"})
+        for p, t in by.items():
+            m = pos == p
+            if m.any():
+                lo[m], hi[m] = apply_interval(pred[m], t)
+        return lo, hi
     edges = np.array(table["edges"], dtype=float)
     b = np.clip(np.searchsorted(edges, pred, side="right") - 1, 0, len(edges) - 2)
     return pred + np.array(table["resid_lo"])[b], pred + np.array(table["resid_hi"])[b]
@@ -74,6 +87,78 @@ def fit_weighted(cfg: dict[str, Any], X: np.ndarray, y: np.ndarray, season, week
     model = make_model(cfg)
     model.fit(impute(X, med), y, sample_weight=w)
     return model, med, w
+
+
+def position_feature_split(cfg: dict[str, Any], feature_cols: list[str]) -> tuple[list[int], list[int]]:
+    """(pooled column indices, per-position column indices). Position-specific features
+    (``features.position_specific_enabled``) go only to per-position models; per-position models
+    drop the constant ``position_code``."""
+    from fantasy_model.features.pipeline import POSITION_SPECIFIC_COLUMNS
+
+    ps = set(POSITION_SPECIFIC_COLUMNS)
+    pooled = [i for i, c in enumerate(feature_cols) if c not in ps]
+    per_pos = [i for i, c in enumerate(feature_cols) if c != "position_code"]
+    return pooled, per_pos
+
+
+def uses_router(cfg: dict[str, Any], feature_cols: list[str]) -> bool:
+    from fantasy_model.features.pipeline import POSITION_SPECIFIC_COLUMNS
+
+    return any(per_position_flags(cfg).values()) or any(c in POSITION_SPECIFIC_COLUMNS for c in feature_cols)
+
+
+def fit_strategy(cfg: dict[str, Any], X: np.ndarray, y: np.ndarray, season, week, feature_cols: list[str]):
+    """Fit per ``model.strategy``: the pooled model (plain ``fit_weighted``, unchanged behaviour) or a
+    :class:`PositionRouterModel` with a separate model for each flagged position (hyper-parameters from
+    ``model.position_params``) and the pooled model for the rest. Medians are computed on all rows
+    (callers impute with ``artifact['impute_medians']``). Returns (model, medians, weights)."""
+    if not uses_router(cfg, feature_cols):
+        return fit_weighted(cfg, X, y, season, week)
+    flags = per_position_flags(cfg)
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=float)
+    season, week = np.asarray(season), np.asarray(week)
+    med = np.nanmedian(X, axis=0) if len(X) else np.zeros(X.shape[1])
+    med = np.where(np.isnan(med), 0.0, med)
+    Xi = impute(X, med)
+    half_life, wps = training_recency(cfg)
+    w = recency_weights(season, week, half_life, wps)
+    pooled_cols, pos_cols = position_feature_split(cfg, feature_cols)
+    pos_col = feature_cols.index("position_code")
+    pooled = None
+    if not all(flags.values()):
+        pooled = make_model(cfg)
+        pooled.fit(Xi[:, pooled_cols], y, sample_weight=w)
+    models = {}
+    for p, on in flags.items():
+        if not on:
+            continue
+        rows = Xi[:, pos_col] == POSITION_CODES[p]
+        if not rows.any():
+            raise ValueError(f"no training rows for position {p}")
+        wp = recency_weights(season[rows], week[rows], half_life, wps)
+        m = make_model(position_cfg(cfg, p))
+        m.fit(Xi[rows][:, pos_cols], y[rows], sample_weight=wp)
+        models[p] = m
+    router = PositionRouterModel(pooled, pooled_cols, models, {p: pos_cols for p in models}, pos_col)
+    return router, med, w
+
+
+def residual_interval_tables(pred, actual, positions, n_bins: int = 10, min_rows: int = 200) -> dict[str, Any]:
+    """Pooled residual table plus one per position (``by_position``) when the position has >= min_rows."""
+    table = residual_interval_table(pred, actual, n_bins)
+    pos = np.asarray(positions).astype(str)
+    by = {}
+    for p in POSITION_CODES:
+        m = pos == p
+        if m.sum() >= min_rows:
+            by[p] = residual_interval_table(np.asarray(pred)[m], np.asarray(actual)[m], n_bins)
+    table["by_position"] = by
+    lo, hi = apply_interval(pred, table, pos)
+    resid_ok = (np.asarray(actual) >= lo) & (np.asarray(actual) <= hi)
+    table["holdout_coverage"] = float(np.mean(resid_ok)) if len(resid_ok) else None
+    table["note"] = "empirical 80% range from holdout residuals of the validation model, binned by projection, per position"
+    return table
 
 
 def train_model(
@@ -133,7 +218,7 @@ def train_model(
 
     half_life, wps = training_recency(cfg)
     wk_all = df["week"].to_numpy() if "week" in df.columns else np.ones(len(df))
-    model, med, w_train = fit_weighted(cfg, X_train, y_train, seasons[train_idx], wk_all[train_idx])
+    model, med, w_train = fit_strategy(cfg, X_train, y_train, seasons[train_idx], wk_all[train_idx], feature_cols)
     X_test = impute(X_test, med)
     pred = model.predict(X_test) if len(test_idx) else np.array([])
 
@@ -205,7 +290,10 @@ def train_model(
     models_dir = Path(cfg["paths"]["models_dir"])
     models_dir.mkdir(parents=True, exist_ok=True)
     out_path = Path(model_out) if model_out else model_path(cfg)
-    interval = residual_interval_table(pred, y_test) if len(test_idx) >= 200 else None
+    if len(test_idx) >= 200 and isinstance(model, PositionRouterModel) and "position" in df.columns:
+        interval = residual_interval_tables(pred, y_test, df.iloc[test_idx]["position"].astype(str).str.upper().to_numpy())
+    else:
+        interval = residual_interval_table(pred, y_test) if len(test_idx) >= 200 else None
     if interval:
         metrics["interval_holdout_coverage"] = interval["holdout_coverage"]
     artifact = {
@@ -216,6 +304,8 @@ def train_model(
         "impute_medians": med,
         "scoring": scoring,
         "cfg_model": cfg.get("model", {}),
+        "strategy": {"per_position": per_position_flags(cfg),
+                     "position_specific_features": bool((cfg.get("features") or {}).get("position_specific_enabled"))},
         "metrics": metrics,
     }
 
@@ -225,8 +315,8 @@ def train_model(
         metrics["validation_model_path"] = str(val_path)
         all_idx = np.where(labelled)[0]
         X_full_raw = X_all.iloc[all_idx][feature_cols].to_numpy(dtype=float)
-        full_model, med_full, w_full = fit_weighted(
-            cfg, X_full_raw, y.iloc[all_idx].to_numpy(dtype=float), seasons[all_idx], wk_all[all_idx]
+        full_model, med_full, w_full = fit_strategy(
+            cfg, X_full_raw, y.iloc[all_idx].to_numpy(dtype=float), seasons[all_idx], wk_all[all_idx], feature_cols
         )
         sub = df.iloc[all_idx]
         last_season = int(sub["season"].max())

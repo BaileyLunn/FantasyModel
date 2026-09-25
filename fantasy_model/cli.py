@@ -21,6 +21,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scoring profile: half_ppr (config default) | ppr | standard. Selects the scoring map, "
         "model artifact (models/fantasy_hgb_{half,ppr,std}.joblib) and output file suffixes.",
     )
+    parser.add_argument(
+        "--per-position",
+        default=None,
+        help="Override model.strategy for train: none|pooled (one model), all (a model per position), "
+        "or a list like QB,TE (hybrid: those positions get their own model, the rest use the pooled one).",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     t = sub.add_parser("train", help="Train model with time-based split")
@@ -54,9 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    from fantasy_model.config import load_config, set_scoring_profile
+    from fantasy_model.config import apply_per_position_override, load_config, set_scoring_profile
 
-    cfg = set_scoring_profile(load_config(args.config), args.scoring)
+    cfg = apply_per_position_override(set_scoring_profile(load_config(args.config), args.scoring), args.per_position)
 
     if args.command == "train":
         from fantasy_model.train import train_model
