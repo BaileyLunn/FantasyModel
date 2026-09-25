@@ -37,5 +37,64 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     return cfg
 
 
+SCORING_PROFILES = ("half_ppr", "ppr", "standard")
+# short tags used in artifact / report file names
+PROFILE_TAGS = {"half_ppr": "half", "ppr": "ppr", "standard": "std"}
+PROFILE_ALIASES = {
+    "half": "half_ppr", "half-ppr": "half_ppr", "half_ppr": "half_ppr", "0.5": "half_ppr",
+    "ppr": "ppr", "full": "ppr", "full_ppr": "ppr", "full-ppr": "ppr", "1": "ppr",
+    "standard": "standard", "std": "standard", "non-ppr": "standard", "0": "standard",
+}
+
+
+def resolve_profile_name(name: str) -> str:
+    key = str(name).strip().lower()
+    if key not in PROFILE_ALIASES:
+        raise ValueError(f"unknown scoring profile {name!r}; choose from {SCORING_PROFILES}")
+    return PROFILE_ALIASES[key]
+
+
+def scoring_profile(cfg: dict[str, Any]) -> str:
+    """Active scoring profile name (``scoring.profile`` in config, overridable via --scoring)."""
+    sc = cfg.get("scoring", {}) or {}
+    return resolve_profile_name(sc.get("profile", "half_ppr")) if isinstance(sc, dict) else "half_ppr"
+
+
+def set_scoring_profile(cfg: dict[str, Any], profile: str | None) -> dict[str, Any]:
+    """Return a copy of ``cfg`` with the active scoring profile switched (no-op for None)."""
+    if not profile:
+        return cfg
+    out = dict(cfg)
+    out["scoring"] = {**(cfg.get("scoring") or {}), "profile": resolve_profile_name(profile)}
+    return out
+
+
 def scoring_dict(cfg: dict[str, Any]) -> dict[str, float]:
-    return dict(cfg.get("scoring", {}))
+    """Scoring map for the active profile.
+
+    Config layout::
+
+        scoring:
+          profile: half_ppr          # half_ppr | ppr | standard
+          base: {pass_yd: 0.04, ...} # shared rules
+          profiles: {half_ppr: {rec: 0.5}, ppr: {rec: 1.0}, standard: {rec: 0.0}}
+
+    A flat legacy mapping (``scoring: {pass_yd: ..., rec: 0.5}``) is still accepted.
+    """
+    sc = dict(cfg.get("scoring", {}) or {})
+    if "base" not in sc and "profiles" not in sc:
+        return {k: float(v) for k, v in sc.items() if k != "profile"}
+    prof = scoring_profile(cfg)
+    out = {k: float(v) for k, v in (sc.get("base") or {}).items()}
+    out.update({k: float(v) for k, v in ((sc.get("profiles") or {}).get(prof) or {}).items()})
+    return out
+
+
+def profile_tag(cfg: dict[str, Any]) -> str:
+    return PROFILE_TAGS[scoring_profile(cfg)]
+
+
+def model_path(cfg: dict[str, Any], validation: bool = False) -> Path:
+    """Default artifact path for the active scoring profile, e.g. models/fantasy_hgb_ppr.joblib."""
+    d = Path(cfg.get("paths", {}).get("models_dir", project_root() / "models"))
+    return d / f"fantasy_hgb_{profile_tag(cfg)}{'_val' if validation else ''}.joblib"

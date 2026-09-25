@@ -41,7 +41,32 @@ FEATURE_COLUMNS = [
     "targets_roll",
     "carries_roll",
     "rec_roll",
+    # depth chart / snap usage (fantasy_model.features.usage; attached at panel build)
+    "depth_rank_filled",
+    "depth_listed",
+    "snap_pct_last",
+    "snap_pct_roll3",
+    "snap_pct_season",
+    "snap_games_season",
+    "has_snap_history",
 ]
+
+UNLISTED_DEPTH_RANK = 9  # players absent from the depth chart are treated as deep reserves
+
+
+def add_usage_features(out: pd.DataFrame) -> pd.DataFrame:
+    """Model-ready depth/snap columns. Explicit fills (not train-median imputation): a player missing
+    from the depth chart is a deep reserve, and no prior snaps means 0 share, not the median."""
+    out = out.copy()
+    dr = pd.to_numeric(out["depth_rank"], errors="coerce") if "depth_rank" in out.columns else pd.Series(float("nan"), index=out.index)
+    out["depth_listed"] = dr.notna().astype(int)
+    out["depth_rank_filled"] = dr.clip(upper=UNLISTED_DEPTH_RANK).fillna(UNLISTED_DEPTH_RANK)
+    last = pd.to_numeric(out.get("snap_pct_last"), errors="coerce") if "snap_pct_last" in out.columns else pd.Series(float("nan"), index=out.index)
+    out["has_snap_history"] = last.notna().astype(int)
+    for c in ("snap_pct_last", "snap_pct_roll3", "snap_pct_season", "snap_games_season"):
+        vals = pd.to_numeric(out[c], errors="coerce") if c in out.columns else pd.Series(float("nan"), index=out.index)
+        out[c] = vals.fillna(0.0)
+    return out
 
 
 def build_feature_matrix(
@@ -77,6 +102,8 @@ def build_feature_matrix(
         out = add_teammate_features(out, rolling_games=rolling)
     if feat_cfg.get("baselines_enabled", True):
         out = add_baseline_features(out, rolling_games=rolling)
+    if feat_cfg.get("usage_enabled", True):
+        out = add_usage_features(out)
 
     # Restore input order after sorts/merges inside feature helpers
     if "_row_id" not in out.columns:

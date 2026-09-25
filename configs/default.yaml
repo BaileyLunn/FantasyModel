@@ -12,20 +12,26 @@ seasons:
   sample_years: [2022, 2023, 2024]
 
 scoring:
-  # ESPN half-PPR defaults
-  pass_yd: 0.04          # 1 pt / 25 yards
-  pass_td: 4.0
-  pass_int: -2.0
-  rush_yd: 0.1           # 1 pt / 10 yards
-  rush_td: 6.0
-  rec: 0.5               # half-PPR
-  rec_yd: 0.1
-  rec_td: 6.0
-  fumble_lost: -2.0
-  two_pt: 2.0
-  pass_300_bonus: 0.0
-  rush_100_bonus: 0.0
-  rec_100_bonus: 0.0
+  # Active profile. Override per command with `python -m fantasy_model --scoring ppr ...`.
+  # ESPN league 746996 is confirmed full PPR (1 pt/rec, pass TD 4, no TE premium) -> use `ppr` for it.
+  profile: half_ppr        # half_ppr | ppr | standard
+  base:                    # rules shared by every profile (ESPN defaults)
+    pass_yd: 0.04          # 1 pt / 25 yards
+    pass_td: 4.0
+    pass_int: -2.0
+    rush_yd: 0.1           # 1 pt / 10 yards
+    rush_td: 6.0
+    rec_yd: 0.1
+    rec_td: 6.0
+    fumble_lost: -2.0
+    two_pt: 2.0
+    pass_300_bonus: 0.0
+    rush_100_bonus: 0.0
+    rec_100_bonus: 0.0
+  profiles:
+    half_ppr: {rec: 0.5}
+    ppr: {rec: 1.0}
+    standard: {rec: 0.0}
 
 model:
   backend: hist_gradient_boosting  # hist_gradient_boosting | lightgbm | xgboost
@@ -58,7 +64,9 @@ features:
   teammates_enabled: true
   baselines_enabled: true
   vegas_enabled: true
+  zero_stat_rows: true     # add snap-count appearances with no offensive stats as 0-point games
+  usage_enabled: true      # depth-chart rank + prior snap share (data/raw/nflverse_extra)
 
 espn:
   league_id: 746996
-  scoring_profile: half_ppr
+  scoring_profile: ppr   # confirmed from ESPN league settings 2026-09-25

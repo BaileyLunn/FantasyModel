@@ -2,7 +2,31 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
+
+from fantasy_model.features.history import prior_weeks_mean
+
+
+def implied_team_total(team, home_team, spread_line, total_line) -> pd.Series:
+    """Vegas implied points for ``team``: total/2 + (team's own expected margin)/2.
+
+    nflverse ``spread_line`` = expected home margin (home favored > 0), so the team's margin is
+    ``+spread`` at home and ``-spread`` on the road. Falls back to total/2 when home is unknown.
+    """
+    total = pd.to_numeric(pd.Series(total_line), errors="coerce").reset_index(drop=True)
+    spread = pd.to_numeric(pd.Series(spread_line), errors="coerce").reset_index(drop=True)
+    idx = total_line.index if isinstance(total_line, pd.Series) else None
+    if home_team is None:
+        res = total / 2.0
+    else:
+        t = pd.Series(team).astype(str).str.upper().reset_index(drop=True)
+        h = pd.Series(home_team).astype(str).str.upper().reset_index(drop=True)
+        margin = np.where(t == h, spread, -spread)
+        res = total / 2.0 + pd.Series(margin, dtype=float) / 2.0
+    if idx is not None:
+        res.index = idx
+    return res
 
 
 def add_baseline_features(df: pd.DataFrame, rolling_games: int = 3) -> pd.DataFrame:
@@ -68,18 +92,10 @@ def add_baseline_features(df: pd.DataFrame, rolling_games: int = 3) -> pd.DataFr
             ]
             opp_col = "opponent_team"
 
-    if opp_col and "position" in out.columns and "fantasy_points" in out.columns:
-        # For each game row, defense = opponent; points scored by offense players against them
-        tmp = out.copy()
-        # Points "allowed" = fantasy points by players facing this defense
-        keys = [opp_col, "position"]
-        tmp = tmp.sort_values(sort_cols) if sort_cols else tmp
-        # Expanding mean of FP by players vs this defense at this position, shifted
-        # Approximate: group by opponent+position across all rows chronologically
-        allowed = (
-            tmp.groupby(keys, dropna=False)["fantasy_points"]
-            .transform(lambda s: s.shift(1).expanding(min_periods=5).mean())
-        )
+    if opp_col and "position" in out.columns and "fantasy_points" in out.columns and "season" in out.columns:
+        # FP allowed by this defense to this position in STRICTLY EARLIER weeks. (The old row-wise
+        # shift(1) let a WR2 row see the WR1's same-game points vs the same defense.)
+        allowed = prior_weeks_mean(out, [opp_col, "position"], "fantasy_points", min_count=5)
         out["opp_pos_fp_allowed"] = allowed.fillna(out.get("fp_season_avg", 0.0))
     else:
         out["opp_pos_fp_allowed"] = out.get("fp_season_avg", 0.0)
@@ -90,19 +106,13 @@ def add_baseline_features(df: pd.DataFrame, rolling_games: int = 3) -> pd.DataFr
             out[c] = pd.to_numeric(out[c], errors="coerce")
         else:
             out[c] = pd.NA
-    # Implied team total heuristic
-    if "spread_line" in out.columns and "total_line" in out.columns and team_col in out.columns:
-        home_col = "home_team" if "home_team" in out.columns else "home"
-        if home_col in out.columns:
-            is_home = out[team_col].astype(str).str.upper() == out[home_col].astype(str).str.upper()
-            # spread_line typically from home perspective in nflverse
-            spread = pd.to_numeric(out["spread_line"], errors="coerce")
-            total = pd.to_numeric(out["total_line"], errors="coerce")
-            home_tt = (total - spread) / 2.0
-            away_tt = (total + spread) / 2.0
-            out["implied_team_total"] = home_tt.where(is_home, away_tt)
-        else:
-            out["implied_team_total"] = pd.to_numeric(out["total_line"], errors="coerce") / 2.0
+    # Implied team total. nflverse ``spread_line`` is the HOME team's expected margin
+    # (positive = home favored; it correlates +0.44 with ``result`` = home - away score).
+    # home implied = total/2 + spread/2, away implied = total/2 - spread/2.
+    if team_col in out.columns:
+        out["implied_team_total"] = implied_team_total(
+            out[team_col], out.get("home_team", out.get("home")), out["spread_line"], out["total_line"]
+        )
     else:
         out["implied_team_total"] = pd.NA
 

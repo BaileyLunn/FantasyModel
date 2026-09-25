@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-from fantasy_model.config import load_config, scoring_dict
+from fantasy_model.config import load_config, model_path as default_model_path, profile_tag, scoring_dict
 from fantasy_model.data import load_player_games
 from fantasy_model.features.pipeline import build_feature_matrix
 from fantasy_model.model import time_based_split
@@ -25,8 +25,7 @@ def evaluate_model(
 ) -> dict[str, Any]:
     cfg = cfg or load_config(config_path)
     scoring = scoring_dict(cfg)
-    models_dir = Path(cfg["paths"]["models_dir"])
-    path = Path(model_path) if model_path else models_dir / "fantasy_hgb.joblib"
+    path = Path(model_path) if model_path else default_model_path(cfg)
     if not path.exists():
         raise FileNotFoundError(f"No model at {path}; run train first")
 
@@ -87,7 +86,7 @@ def evaluate_model(
     }
     reports_dir = Path(cfg["paths"]["reports_dir"])
     reports_dir.mkdir(parents=True, exist_ok=True)
-    out = reports_dir / "eval_report.json"
+    out = reports_dir / f"eval_report_{profile_tag(cfg)}.json"
     out.write_text(json.dumps(report, indent=2), encoding="utf-8")
     report["report_path"] = str(out)
     return report
@@ -119,7 +118,7 @@ def evaluate_slice(
     """
     cfg = cfg or load_config(config_path)
     scoring = scoring_dict(cfg)
-    path = Path(model_path) if model_path else Path(cfg["paths"]["models_dir"]) / "fantasy_hgb.joblib"
+    path = Path(model_path) if model_path else default_model_path(cfg)
     artifact = joblib.load(path)
     if df is None:
         df, _ = load_player_games(cfg)
@@ -141,6 +140,7 @@ def evaluate_slice(
     pos = sub["position"].astype(str).str.upper().to_numpy()
 
     report: dict[str, Any] = {
+        "scoring_profile": artifact.get("scoring_profile"),
         "model_path": str(path),
         "model_train_seasons": artifact.get("metrics", {}).get("train_seasons")
         or artifact.get("metrics", {}).get("seasons_in_data"),
@@ -150,6 +150,14 @@ def evaluate_slice(
         "by_position": {p: _metrics(y_true[pos == p], pred[pos == p]) for p in sorted(np.unique(pos))},
         "by_week": {},
     }
+    if "zero_stat_appearance" in sub.columns:
+        keep = pd.to_numeric(sub["zero_stat_appearance"], errors="coerce").fillna(0).to_numpy() != 1
+        report["stats_rows_only"] = {
+            **_metrics(y_true[keep], pred[keep]),
+            "by_position": {p: _metrics(y_true[keep & (pos == p)], pred[keep & (pos == p)]) for p in sorted(np.unique(pos[keep]))},
+            "by_week": {str(int(w)): _metrics(y_true[keep & (wk == w)], pred[keep & (wk == w)]) for w in sorted(np.unique(wk[keep]))},
+            "note": "excludes zero-stat snap-count appearances; comparable to earlier panels",
+        }
     for w in sorted(np.unique(wk)):
         m = wk == w
         report["by_week"][str(int(w))] = {

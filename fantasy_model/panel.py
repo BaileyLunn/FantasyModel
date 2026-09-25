@@ -10,6 +10,7 @@ from typing import Mapping
 import pandas as pd
 
 from fantasy_model.scoring import ensure_fantasy_points
+from fantasy_model.teams import normalize_team_columns
 
 SKILL_POSITIONS = ["QB", "RB", "WR", "TE"]
 
@@ -23,7 +24,7 @@ SCHED_COLS = (
 def team_schedule(schedules: pd.DataFrame) -> pd.DataFrame:
     """One row per (season, week, team) with game context."""
     cols = [c for c in SCHED_COLS if c in schedules.columns]
-    sched = schedules[cols].drop_duplicates()
+    sched = normalize_team_columns(schedules[cols].drop_duplicates())
     home = sched.copy()
     away = sched.copy()
     home["team"] = home["home_team"]
@@ -68,11 +69,31 @@ def build_panel(
     schedules: pd.DataFrame | None,
     injuries: pd.DataFrame | None,
     scoring: Mapping[str, float],
+    raw_dir: str | None = None,
+    add_zero_stat_rows: bool = False,
 ) -> pd.DataFrame:
-    """Join weekly player rows to schedule + injuries; REG season skill positions only."""
+    """Join weekly player rows to schedule + injuries; REG season skill positions only.
+
+    Team codes on both sides are normalized to the current franchise code (OAK->LV, SD->LAC,
+    STL->LA) so relocated-team seasons join their schedule. When ``raw_dir`` is given, depth-chart
+    rank and prior snap-share context (``fantasy_model.features.usage``) are attached, and with
+    ``add_zero_stat_rows`` snap-count appearances without any offensive stat are added as 0-point
+    player-games (flag ``zero_stat_appearance``).
+    """
     weekly = weekly.copy()
+    if add_zero_stat_rows and raw_dir is not None:
+        from fantasy_model.features.usage import rostered_no_snap_rows, zero_stat_appearances
+
+        zero = pd.concat([zero_stat_appearances(weekly, raw_dir), rostered_no_snap_rows(weekly, raw_dir)],
+                         ignore_index=True, sort=False)
+        weekly["zero_stat_appearance"] = 0
+        if not zero.empty:
+            if "team" in weekly.columns and "recent_team" not in weekly.columns:
+                zero = zero.rename(columns={"recent_team": "team"})
+            weekly = pd.concat([weekly, zero], ignore_index=True, sort=False)
     if "recent_team" in weekly.columns and "team" not in weekly.columns:
         weekly = weekly.rename(columns={"recent_team": "team"})
+    weekly = normalize_team_columns(weekly)
     if "player_display_name" in weekly.columns and "player_name" not in weekly.columns:
         weekly["player_name"] = weekly["player_display_name"]
     for c in ("season", "week"):
@@ -83,6 +104,18 @@ def build_panel(
         team_sched = team_schedule(schedules)
         keys = [c for c in ("season", "week", "team") if c in weekly.columns and c in team_sched.columns]
         panel = weekly.merge(team_sched, on=keys, how="left", suffixes=("", "_sched"))
+        if "zero_row_type" in panel.columns:
+            # rostered-no-snap rows for a team on its bye week are not games
+            bye = panel["zero_row_type"].eq("rostered_no_snap") & panel["game_id"].isna()
+            panel = panel.loc[~bye].copy()
+        if {"home_team", "away_team", "team"} <= set(panel.columns):
+            derived = panel["home_team"].where(panel["team"] != panel["home_team"], panel["away_team"])
+            if "opponent_team" in panel.columns:
+                # legacy player_stats sets opponent_team == team on special-teams-TD-only rows
+                bad = panel["opponent_team"].isna() | (panel["opponent_team"] == panel["team"])
+                panel["opponent_team"] = panel["opponent_team"].where(~bad, derived)
+            else:
+                panel["opponent_team"] = derived
     else:
         panel = weekly
 
@@ -98,4 +131,9 @@ def build_panel(
         panel = panel[panel["position"].astype(str).str.upper().isin(SKILL_POSITIONS)].copy()
     if "season_type" in panel.columns:
         panel = panel[panel["season_type"].astype(str).str.upper().eq("REG")].copy()
-    return panel.reset_index(drop=True)
+    panel = panel.reset_index(drop=True)
+    if raw_dir is not None:
+        from fantasy_model.features.usage import add_usage_context
+
+        panel = add_usage_context(panel, raw_dir, schedules)
+    return panel

@@ -47,6 +47,22 @@ TEAM_COORDS: dict[str, tuple[float, float]] = {
 }
 
 
+# Franchise-code venues that moved inside the data window: (team, first_season, last_season) -> coords.
+# Needed once OAK/SD are normalized to LV/LAC (fantasy_model.teams).
+HISTORIC_VENUES: dict[tuple[str, int, int], tuple[float, float]] = {
+    ("LV", 1900, 2019): (37.7516, -122.2005),   # Oakland Coliseum (Raiders in Oakland through 2019)
+    ("LAC", 1900, 2016): (32.7831, -117.1196),  # Qualcomm Stadium, San Diego (Chargers through 2016)
+}
+
+
+def team_coords(team: str, season: int | None = None) -> tuple[float, float] | None:
+    if season is not None:
+        for (t, lo, hi), c in HISTORIC_VENUES.items():
+            if t == team and lo <= int(season) <= hi:
+                return c
+    return TEAM_COORDS.get(team)
+
+
 def haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Great-circle distance in miles between two WGS84 points."""
     r = 3958.7613  # Earth radius miles
@@ -61,6 +77,7 @@ def travel_distance_miles(
     team: str,
     home_team: str,
     coords: Mapping[str, tuple[float, float]] | None = None,
+    season: int | None = None,
 ) -> float:
     """Miles from team's home stadium to the game stadium (home_team venue).
 
@@ -84,10 +101,14 @@ def travel_distance_miles(
     home_u = _u(home_team)
     if not team_u or not home_u or team_u == home_u:
         return 0.0
-    if team_u not in coords or home_u not in coords:
+    if coords is TEAM_COORDS:
+        a, b = team_coords(team_u, season), team_coords(home_u, season)
+    else:
+        a, b = coords.get(team_u), coords.get(home_u)
+    if a is None or b is None:
         return 0.0
-    lat1, lon1 = coords[team_u]
-    lat2, lon2 = coords[home_u]
+    lat1, lon1 = a
+    lat2, lon2 = b
     return haversine_miles(lat1, lon1, lat2, lon2)
 
 
@@ -107,7 +128,11 @@ def add_travel_features(df: pd.DataFrame) -> pd.DataFrame:
     teams = out[team_col].astype(str).str.upper()
     homes = out[home_col].astype(str).str.upper()
     out["is_home"] = (teams == homes).astype(int)
+    seasons = (
+        pd.to_numeric(out["season"], errors="coerce").tolist() if "season" in out.columns else [None] * len(out)
+    )
     out["travel_miles"] = [
-        travel_distance_miles(t, h) for t, h in zip(teams.tolist(), homes.tolist(), strict=False)
+        travel_distance_miles(t, h, season=None if (y is None or y != y) else int(y))
+        for t, h, y in zip(teams.tolist(), homes.tolist(), seasons, strict=False)
     ]
     return out

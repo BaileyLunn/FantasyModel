@@ -15,6 +15,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Prefer data/sample fixtures (offline smoke)",
     )
+    parser.add_argument(
+        "--scoring",
+        default=None,
+        help="Scoring profile: half_ppr (config default) | ppr | standard. Selects the scoring map, "
+        "model artifact (models/fantasy_hgb_{half,ppr,std}.joblib) and output file suffixes.",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     t = sub.add_parser("train", help="Train model with time-based split")
@@ -26,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     e = sub.add_parser("evaluate", help="Evaluate saved model (holdout season, or --season/--weeks slice)")
     e.add_argument("--season", type=int, default=None, help="Score this season's played games instead of test_season")
     e.add_argument("--weeks", type=int, nargs="*", default=None)
-    e.add_argument("--model", type=str, default=None, help="Model artifact path (default models/fantasy_hgb.joblib)")
+    e.add_argument("--model", type=str, default=None, help="Model artifact path (default models/fantasy_hgb_<profile>.joblib)")
     e.add_argument("--out", type=str, default=None, help="Write JSON report here")
 
     p = sub.add_parser("predict", help="Predict a season/week")
@@ -40,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     pj.add_argument("--model", type=str, default=None)
     pj.add_argument("--no-refresh-roster", action="store_true")
     pj.add_argument("--out", type=str, default=None)
+    pj.add_argument("--no-drivers", action="store_true", help="Skip per-row top-feature drivers")
 
     return parser
 
@@ -47,12 +54,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    from fantasy_model.config import load_config, set_scoring_profile
+
+    cfg = set_scoring_profile(load_config(args.config), args.scoring)
 
     if args.command == "train":
         from fantasy_model.train import train_model
 
         metrics = train_model(
-            config_path=args.config,
+            cfg=cfg,
             prefer_sample=args.sample,
             test_season=args.test_season,
             refit_full=args.refit_full,
@@ -68,10 +78,10 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.season is not None:
             report = evaluate_slice(
-                args.season, args.weeks, config_path=args.config, model_path=args.model, out_path=args.out
+                args.season, args.weeks, cfg=cfg, model_path=args.model, out_path=args.out
             )
         else:
-            report = evaluate_model(config_path=args.config, prefer_sample=args.sample, model_path=args.model)
+            report = evaluate_model(cfg=cfg, prefer_sample=args.sample, model_path=args.model)
         print(json.dumps(report, indent=2))
         return 0
 
@@ -83,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
             week=args.week,
             player=args.player,
             prefer_sample=args.sample,
-            config_path=args.config,
+            cfg=cfg,
         )
         if df.empty:
             print(json.dumps({"error": "no rows matched", "season": args.season, "week": args.week}))
@@ -96,8 +106,8 @@ def main(argv: list[str] | None = None) -> int:
         from fantasy_model.project import project_week
 
         df = project_week(
-            args.season, args.week, config_path=args.config, model_path=args.model,
-            refresh_roster=not args.no_refresh_roster, out_path=args.out,
+            args.season, args.week, cfg=cfg, model_path=args.model,
+            refresh_roster=not args.no_refresh_roster, out_path=args.out, drivers=not args.no_drivers,
         )
         print(df.head(40).to_string(index=False))
         print(f"\nrows={len(df)} -> {df.attrs.get('out_path')}")

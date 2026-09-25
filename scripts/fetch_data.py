@@ -134,6 +134,17 @@ def main(argv: list[str] | None = None) -> int:
             _replace_seasons(inj_path, inj_new, inj_seasons).to_csv(inj_path, index=False)
             print(f"  injuries rows={len(inj_new)} for {inj_seasons}")
 
+        # depth charts + snap counts (+ players id map) for usage features
+        from fantasy_model.features.usage import download_usage_sources
+
+        usage_seasons = list(refresh)
+        prev = min(seasons) - 1  # prior-season snaps feed the first weeks' snap features
+        if not (raw_dir / "nflverse_extra" / f"snap_counts_{prev}.parquet").exists():
+            usage_seasons.append(prev)
+        errs = download_usage_sources(raw_dir, usage_seasons)
+        meta["errors"].extend(errs)
+        print(f"  depth_charts/snap_counts refreshed for {refresh} ({len(errs)} errors)")
+
     if not weekly_path.exists():
         print("No weekly.csv present", file=sys.stderr)
         return 1
@@ -145,7 +156,8 @@ def main(argv: list[str] | None = None) -> int:
     schedules = pd.read_csv(schedules_path, low_memory=False) if schedules_path.exists() else pd.DataFrame()
     injuries = pd.read_csv(inj_path, low_memory=False) if inj_path.exists() else None
 
-    panel = build_panel(weekly, schedules, injuries, scoring_dict(cfg))
+    panel = build_panel(weekly, schedules, injuries, scoring_dict(cfg), raw_dir=str(raw_dir),
+                        add_zero_stat_rows=bool(cfg.get("features", {}).get("zero_stat_rows", True)))
 
     out_csv = processed_dir / "player_games.csv"
     panel.to_csv(out_csv, index=False)
@@ -155,6 +167,12 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     meta["n_rows"] = int(len(panel))
+    if "zero_stat_appearance" in panel.columns:
+        meta["zero_stat_appearance_rows"] = int(pd.to_numeric(panel["zero_stat_appearance"], errors="coerce").fillna(0).sum())
+    meta["rows_without_schedule"] = int(panel["game_id"].isna().sum()) if "game_id" in panel.columns else None
+    if "depth_rank" in panel.columns:
+        meta["depth_rank_coverage"] = float(panel["depth_rank"].notna().mean())
+        meta["snap_history_coverage"] = float(panel["snap_pct_last"].notna().mean())
     meta["seasons_present"] = sorted(map(int, panel["season"].dropna().unique())) if "season" in panel.columns else []
     counts = panel.groupby("season").size()
     meta["rows_per_season"] = {str(int(k)): int(v) for k, v in counts.items()}

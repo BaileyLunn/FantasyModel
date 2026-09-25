@@ -11,10 +11,49 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-from fantasy_model.config import load_config, project_root, scoring_dict
+from fantasy_model.config import load_config, model_path, profile_tag, scoring_dict, scoring_profile
 from fantasy_model.data import load_player_games
 from fantasy_model.features.pipeline import build_feature_matrix
 from fantasy_model.model import make_model, time_based_split
+
+INTERVAL_QUANTILES = (0.10, 0.90)
+
+
+def residual_interval_table(pred: np.ndarray, actual: np.ndarray, n_bins: int = 10) -> dict[str, Any]:
+    """Empirical residual quantiles by projection bin (quantile bins of the prediction).
+
+    Used to attach an honest, out-of-sample 80% range to projections: for a projection falling in
+    bin b, low/high = projection + q10/q90 of (actual - predicted) on the holdout rows in bin b.
+    """
+    pred = np.asarray(pred, dtype=float)
+    resid = np.asarray(actual, dtype=float) - pred
+    edges = np.unique(np.quantile(pred, np.linspace(0, 1, n_bins + 1)))
+    edges[0], edges[-1] = -np.inf, np.inf
+    b = np.clip(np.searchsorted(edges, pred, side="right") - 1, 0, len(edges) - 2)
+    lo, hi, n = [], [], []
+    for i in range(len(edges) - 1):
+        r = resid[b == i]
+        lo.append(float(np.quantile(r, INTERVAL_QUANTILES[0])) if len(r) else float("nan"))
+        hi.append(float(np.quantile(r, INTERVAL_QUANTILES[1])) if len(r) else float("nan"))
+        n.append(int(len(r)))
+    inside = None
+    if len(pred):
+        lo_a, hi_a = np.array(lo)[b], np.array(hi)[b]
+        inside = float(np.mean((resid >= lo_a) & (resid <= hi_a)))
+    return {
+        "edges": [float(e) for e in edges], "resid_lo": lo, "resid_hi": hi, "n": n,
+        "quantiles": list(INTERVAL_QUANTILES), "holdout_coverage": inside,
+        "note": "empirical 80% range from holdout residuals of the validation model, binned by projection",
+    }
+
+
+def apply_interval(pred: np.ndarray, table: dict[str, Any] | None) -> tuple[np.ndarray, np.ndarray]:
+    pred = np.asarray(pred, dtype=float)
+    if not table:
+        return np.full_like(pred, np.nan), np.full_like(pred, np.nan)
+    edges = np.array(table["edges"], dtype=float)
+    b = np.clip(np.searchsorted(edges, pred, side="right") - 1, 0, len(edges) - 2)
+    return pred + np.array(table["resid_lo"])[b], pred + np.array(table["resid_hi"])[b]
 
 
 def train_model(
@@ -90,6 +129,8 @@ def train_model(
     pred = model.predict(X_test) if len(test_idx) else np.array([])
 
     metrics: dict[str, Any] = {
+        "scoring_profile": scoring_profile(cfg),
+        "scoring": scoring,
         "source": source,
         "split": split_note,
         "test_season": test_season,
@@ -109,6 +150,29 @@ def train_model(
             }
         )
 
+    if len(test_idx) and "zero_stat_appearance" in df.columns:
+        # Comparable to pre-2026-09-25 metrics: only player-games that have a weekly stats row
+        zs = pd.to_numeric(df.iloc[test_idx]["zero_stat_appearance"], errors="coerce").fillna(0).to_numpy() == 1
+        keep = ~zs
+        pos_k = df.iloc[test_idx]["position"].astype(str).str.upper().to_numpy()[keep]
+        metrics["stats_rows_only"] = {
+            "n": int(keep.sum()),
+            "mae": float(mean_absolute_error(y_test[keep], pred[keep])),
+            "rmse": float(mean_squared_error(y_test[keep], pred[keep]) ** 0.5),
+            "r2": float(r2_score(y_test[keep], pred[keep])),
+            "by_position": {
+                p: {
+                    "n": int((pos_k == p).sum()),
+                    "mae": float(mean_absolute_error(y_test[keep][pos_k == p], pred[keep][pos_k == p])),
+                    "rmse": float(mean_squared_error(y_test[keep][pos_k == p], pred[keep][pos_k == p]) ** 0.5),
+                    "r2": float(r2_score(y_test[keep][pos_k == p], pred[keep][pos_k == p])),
+                }
+                for p in sorted(np.unique(pos_k))
+            },
+            "note": "excludes zero-stat snap-count appearances; comparable to earlier panels",
+        }
+        metrics["zero_stat_rows_in_test"] = int(zs.sum())
+
     if len(test_idx) and "position" in df.columns:
         pos = df.iloc[test_idx]["position"].astype(str).str.upper().to_numpy()
         metrics["by_position"] = {
@@ -124,8 +188,13 @@ def train_model(
 
     models_dir = Path(cfg["paths"]["models_dir"])
     models_dir.mkdir(parents=True, exist_ok=True)
-    out_path = Path(model_out) if model_out else models_dir / "fantasy_hgb.joblib"
+    out_path = Path(model_out) if model_out else model_path(cfg)
+    interval = residual_interval_table(pred, y_test) if len(test_idx) >= 200 else None
+    if interval:
+        metrics["interval_holdout_coverage"] = interval["holdout_coverage"]
     artifact = {
+        "scoring_profile": scoring_profile(cfg),
+        "interval": interval,
         "model": model,
         "feature_cols": feature_cols,
         "impute_medians": med,
@@ -167,7 +236,8 @@ def train_model(
 
     reports_dir = Path(cfg["paths"]["reports_dir"])
     reports_dir.mkdir(parents=True, exist_ok=True)
-    report_path = reports_dir / "train_metrics.json"
+    tag = profile_tag(cfg)
+    report_path = reports_dir / f"train_metrics_{tag}.json"
     report_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     metrics["report_path"] = str(report_path)
 
@@ -176,7 +246,7 @@ def train_model(
         meta = X_all.iloc[test_idx].copy()
         meta["actual_fp"] = y_test
         meta["predicted_fp"] = pred
-        pred_path = reports_dir / "test_predictions.csv"
+        pred_path = reports_dir / f"test_predictions_{tag}.csv"
         keep = [c for c in meta.columns if c in feature_cols or c in (
             "player_id", "player_name", "player_display_name", "season", "week",
             "team", "position", "actual_fp", "predicted_fp",

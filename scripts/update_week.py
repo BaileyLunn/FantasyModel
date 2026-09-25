@@ -11,10 +11,11 @@ stat corrections land early in the week):
 Steps
  1. Refresh raw nflverse data for ``--season`` and rebuild the panel capped at week N
     (history seasons are read from data/raw; use --refresh-all to re-download them).
+ For each scoring profile in --scoring (default half_ppr and ppr):
  2. Score the CURRENT production model on week N before refitting (true out-of-sample,
-    as long as that model was trained through week N-1) -> reports/oos/prod_on_{S}_w{N}.json
+    as long as that model was trained through week N-1) -> reports/oos/prod_{tag}_on_{S}_w{N}.json
  3. Retrain (config: validation on model.test_season, refit_full on all labelled rows).
- 4. Project week N+1 -> reports/projections_{S}_w{N+1}.csv
+ 4. Project week N+1 -> reports/projections_{S}_w{N+1}_{tag}.csv  (tag = half | ppr | std)
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import joblib
 
 import fetch_data
-from fantasy_model.config import load_config
+from fantasy_model.config import load_config, model_path, profile_tag, set_scoring_profile
 from fantasy_model.evaluate import evaluate_slice
 from fantasy_model.project import project_week
 from fantasy_model.train import train_model
@@ -48,6 +49,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--refresh-all", action="store_true", help="Re-download every season, not just --season")
     p.add_argument("--no-train", action="store_true")
     p.add_argument("--no-project", action="store_true")
+    p.add_argument("--scoring", nargs="+", default=["half_ppr", "ppr"],
+                   help="Scoring profiles to score/retrain/project (default: half_ppr ppr)")
     p.add_argument("--allow-partial", action="store_true", help="Proceed even if some week-N games are not in the stats yet")
     args = p.parse_args(argv)
 
@@ -84,38 +87,43 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 3
 
-    summary: dict = {"season": S, "week": N, "week_rows": wk_meta}
+    summary: dict = {"season": S, "week": N, "week_rows": wk_meta, "profiles": {}}
     reports = Path(cfg["paths"]["reports_dir"])
-    models = Path(cfg["paths"]["models_dir"])
-    prod = models / "fantasy_hgb.joblib"
-    if prod.exists():
-        art = joblib.load(prod)
-        refit = (art.get("metrics") or {}).get("refit_full") or {}
-        trained_through = (
-            (max(refit.get("train_seasons", [0])), max(refit.get("last_season_weeks", [0])))
-            if refit
-            else (max((art.get("metrics") or {}).get("train_seasons", [0])), 99)
-        )
-        oos = trained_through[0] < S or (trained_through[0] == S and trained_through[1] < N)
-        rep = evaluate_slice(S, [N], cfg=cfg, model_path=str(prod), out_path=str(reports / "oos" / f"prod_on_{S}_w{N}.json"))
-        rep["out_of_sample"] = bool(oos)
-        summary["pre_refit_score"] = {"out_of_sample": bool(oos), **rep["overall"], "by_position": rep["by_position"]}
-        print(json.dumps(summary["pre_refit_score"], indent=2))
+    base_cfg = cfg
+    for prof in args.scoring:
+        cfg = set_scoring_profile(base_cfg, prof)
+        tag = profile_tag(cfg)
+        ps: dict = {}
+        summary["profiles"][tag] = ps
+        prod = model_path(cfg)
+        if prod.exists():
+            art = joblib.load(prod)
+            refit = (art.get("metrics") or {}).get("refit_full") or {}
+            trained_through = (
+                (max(refit.get("train_seasons", [0])), max(refit.get("last_season_weeks", [0])))
+                if refit
+                else (max((art.get("metrics") or {}).get("train_seasons", [0])), 99)
+            )
+            oos = trained_through[0] < S or (trained_through[0] == S and trained_through[1] < N)
+            rep = evaluate_slice(S, [N], cfg=cfg, model_path=str(prod),
+                                 out_path=str(reports / "oos" / f"prod_{tag}_on_{S}_w{N}.json"))
+            ps["pre_refit_score"] = {"out_of_sample": bool(oos), **rep["overall"], "by_position": rep["by_position"]}
+            print(tag, json.dumps(ps["pre_refit_score"], indent=2))
+            if not args.no_train:
+                shutil.copy2(prod, prod.with_name(f"{prod.stem}_before_{S}_w{N}.joblib"))
+
         if not args.no_train:
-            shutil.copy2(prod, models / f"fantasy_hgb_before_{S}_w{N}.joblib")
+            m = train_model(cfg=cfg)
+            ps["train"] = {k: m.get(k) for k in ("test_season", "n_train", "n_test", "mae", "rmse", "r2", "refit_full")}
+            print(tag, json.dumps(ps["train"], indent=2))
 
-    if not args.no_train:
-        m = train_model(cfg=cfg)
-        summary["train"] = {k: m.get(k) for k in ("test_season", "n_train", "n_test", "mae", "rmse", "r2", "refit_full")}
-        print(json.dumps(summary["train"], indent=2))
-
-    if not args.no_project:
-        try:
-            proj = project_week(S, N + 1, cfg=cfg)
-            summary["projections"] = {"rows": int(len(proj)), "path": proj.attrs.get("out_path")}
-            print(f"projections: {summary['projections']}")
-        except ValueError as e:
-            print(f"projection skipped: {e}")
+        if not args.no_project:
+            try:
+                proj = project_week(S, N + 1, cfg=cfg)
+                ps["projections"] = {"rows": int(len(proj)), "path": proj.attrs.get("out_path")}
+                print(f"{tag} projections: {ps['projections']}")
+            except ValueError as e:
+                print(f"projection skipped: {e}")
 
     (reports / "oos").mkdir(parents=True, exist_ok=True)
     (reports / "oos" / f"update_{S}_w{N}.json").write_text(json.dumps(summary, indent=2, default=str))

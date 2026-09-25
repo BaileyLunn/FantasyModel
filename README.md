@@ -2,33 +2,33 @@
 
 Predict **expected fantasy points** for NFL player-games (pre-game features only) using nflverse history.
 
-**Default scoring:** ESPN half-PPR (`0.5` PPR). Configure in `configs/default.yaml`.
+**Scoring profiles:** `half_ppr` (config default), `ppr`, `standard` — pick with `--scoring` (e.g. `python -m fantasy_model --scoring ppr project ...`)
+or `scoring.profile` in `configs/default.yaml`. ESPN league 746996 is **full PPR** → use `--scoring ppr`.
+Each profile has its own artifact: `models/fantasy_hgb_{half,ppr,std}.joblib` (+ `_val`).
 
-**Seasons in the panel:** **2016–2025** regular season + **2026 weeks 1–2** (QB/RB/WR/TE, 51,626 player-games).
-2016–2024 weekly stats come from `nfl_data_py`; 2025+ from the nflverse `stats_player_week` release
-(the legacy `player_stats` release 404s from 2025 on — handled automatically in `fantasy_model/sources.py`).
+**Panel:** 2016–2025 REG + 2026 weeks 1–2, QB/RB/WR/TE: 51,626 stat-line player-games plus 32,059 real 0-point rows
+(snap-count appearances with no stat, and active-roster weeks with no snap) = 83,685 rows.
+2016–2024 weekly stats come from `nfl_data_py`; 2025+ from nflverse `stats_player_week` (`fantasy_model/sources.py`).
+Depth charts, snap counts, weekly rosters and the players id map come from nflverse-data releases (`fantasy_model/features/usage.py`).
 
 ## Results (real data, leakage-aware)
 
-Validation: train seasons `< 2025`, test **2025 REG** (`model.test_season`). The production artifact is then
-refit on all labelled rows through the latest completed week (`model.refit_full: true`).
+Validation: train seasons `< 2025`, test **2025 REG**; in-season check: train `< 2026`, test 2026 wk1–2.
+Production artifacts are refit on every labelled row through the latest completed week.
 
-| Metric (2025 holdout, half-PPR) | Value |
-|--------|------:|
-| n_train | 45,715 |
-| n_test | 5,285 |
-| MAE | **4.38** |
-| RMSE | **5.90** |
-| R² | **0.36** |
+| MAE / RMSE / R² (stat-line rows, comparable to earlier versions) | half-PPR | full PPR |
+|---|---|---|
+| 2025 holdout (n=5,285) | 4.16 / 5.86 / 0.372 | 4.58 / 6.35 / 0.353 |
+| 2026 wk1–2 (n=626) | 4.37 / 6.20 / 0.358 | 4.80 / 6.72 / 0.338 |
+| Roster backtest 2026 wk1–2, all ACT players (n=904) | 3.43 / 5.24 / 0.481 | 3.78 / 5.70 / 0.478 |
 
-By position (2025 test MAE): QB 6.43 · RB 4.58 · TE 3.34 · WR 4.17
+Before the 2026-09-25 fix pass (half-PPR): 2025 4.38 / 5.90 / 0.362; 2026 4.62 / 6.35 / 0.326; roster backtest 4.43 / 5.83 / 0.359.
+Details, ablations and the list of fixes: `reports/UPDATE_2026_W3_FIXES.md`. Earlier update: `reports/UPDATE_2026_W2.md`.
 
-Previous v1 (train < 2024, test 2024): MAE 4.40 · RMSE 5.89 · R² 0.38. v1 scored out-of-sample on 2026 weeks 1–2:
-MAE 4.65 · RMSE 6.36 · R² 0.32 (n=626). Full before/after tables: `reports/UPDATE_2026_W2.md`.
+Reports: `reports/train_metrics_{half,ppr}.json`, `reports/validation_{half,ppr}.json`, `reports/eval_report_{half,ppr}.json`, `reports/oos/*.json`.
 
-Reports: `reports/train_metrics.json`, `reports/eval_report.json`, `reports/oos/*.json`, `reports/SEASONS_USED.md`.
-
-> Same-game usage (targets/carries that week) is **not** used as a feature. Rolling usage / FP / injury analogs / opponent allowances all use `shift(1)` so validation reflects pre-game information.
+> Same-game usage is **not** a feature. Rolling usage / FP / snap share use prior games; group aggregates
+> (opponent allowances, injury analogs, team QB form) use strictly earlier *weeks* so validation reflects pre-game information.
 
 ## Layout
 
@@ -38,14 +38,18 @@ FantasyModel/
   fantasy_model/           # scoring, features/*, train, evaluate, predict, cli
   fantasy_model/sources.py  # nflverse URLs + stats_player -> legacy schema
   fantasy_model/panel.py    # weekly + schedule + injuries join
-  fantasy_model/project.py  # forward (upcoming-week) projections
+  fantasy_model/project.py  # forward (upcoming-week) projections (+ 80% range, drivers)
+  fantasy_model/teams.py    # OAK/SD/STL -> LV/LAC/LA normalization
+  fantasy_model/features/usage.py    # depth charts, snap counts, zero-point rows
+  fantasy_model/features/history.py  # prior-weeks group aggregates (no same-week leakage)
+  scripts/validate_models.py         # 2025 holdout + 2026 in-season validation per profile
   scripts/fetch_data.py
   scripts/update_week.py    # in-season: add week N, score, retrain, project N+1
   scripts/make_sample_data.py
   data/raw/                # gitignored nflverse downloads
   data/processed/          # gitignored player_games panel
   data/sample/             # offline smoke fixtures
-  models/fantasy_hgb.joblib
+  models/fantasy_hgb_{half,ppr}.joblib
   reports/
   tests/
 ```
@@ -69,11 +73,13 @@ python scripts/fetch_data.py --seasons 2016 2017 2018 2019 2020 2021 2022 2023 2
 # Rebuild panel only from existing raw files, as of a given week:
 python scripts/fetch_data.py --skip-download --seasons 2016 ... 2026 --max-week 2026:2
 
-python -m fantasy_model train                         # validate on 2025, refit on everything
-python -m fantasy_model evaluate                      # 2025 holdout (uses models/fantasy_hgb_val.joblib)
-python -m fantasy_model evaluate --season 2026 --weeks 1 2 --model models/fantasy_hgb.joblib
-python -m fantasy_model predict --season 2024 --week 10          # played weeks (shows actuals)
-python -m fantasy_model project --season 2026 --week 3           # upcoming week -> reports/projections_2026_w3.csv
+python -m fantasy_model --scoring ppr train               # validate on 2025, refit on everything
+python -m fantasy_model --scoring half_ppr train
+python -m fantasy_model --scoring ppr evaluate            # 2025 holdout (uses models/fantasy_hgb_ppr_val.joblib)
+python -m fantasy_model --scoring ppr evaluate --season 2026 --weeks 1 2
+python -m fantasy_model --scoring ppr predict --season 2024 --week 10   # played weeks (shows actuals)
+python -m fantasy_model --scoring ppr project --season 2026 --week 3    # -> reports/projections_2026_w3_ppr.csv
+python scripts/validate_models.py --scoring half_ppr ppr --ablate-usage # validation tables
 ```
 
 ## In-season weekly update
@@ -90,14 +96,15 @@ python scripts/update_week.py --season 2026 --week 3
    (flagged `out_of_sample` when the model was trained through week N−1); the old artifact is kept as
    `models/fantasy_hgb_before_2026_w3.joblib`;
 3. retrains (2025 validation + full refit);
-4. projects week N+1 → `reports/projections_2026_w4.csv`.
+4. projects week N+1 → `reports/projections_2026_w4_{half,ppr}.csv`.
+Steps 2–4 run for each profile in `--scoring` (default `half_ppr ppr`).
 
 ### Offline smoke (synthetic)
 
 ```bash
 python scripts/make_sample_data.py
-python -m fantasy_model --sample train
-python -m fantasy_model --sample evaluate
+python -m fantasy_model --sample train --model-out /tmp/sample.joblib --no-reports   # don't clobber real models
+python -m fantasy_model --sample evaluate --model /tmp/sample.joblib
 python -m fantasy_model --sample predict --season 2024 --week 5
 ```
 
@@ -110,7 +117,8 @@ python -m fantasy_model --sample predict --season 2024 --week 5
 | Travel | Haversine miles team home → game stadium; `is_home` |
 | Timezone | `tz_vs_home`, `tz_vs_prev_game` (fixed US offsets; DST ignored) |
 | Teammates | Prior QB FP, backup-QB heuristic, **rolling prior** target/rush shares |
-| Baselines | Opp FP allowed vs position, rest days, rolling/season FP, Vegas spread/total → implied team total |
+| Baselines | Opp FP allowed vs position (prior weeks), rest days, rolling/season FP, Vegas spread/total → implied team total (total/2 ± home spread/2) |
+| Usage | Depth-chart rank (pre-game), prior snap share (last / 3-game / season), games with snaps this season |
 
 Model: `HistGradientBoostingRegressor` (optional `lightgbm` / `xgboost` via config).
 
@@ -120,18 +128,16 @@ Model: `HistGradientBoostingRegressor` (optional `lightgbm` / `xgboost` via conf
 pytest -q
 ```
 
-Dome weather nulling, timezone deltas, travel distance, half-PPR scoring, stats_player harmonization, projection-row labels, forward roster rows.
+Dome weather nulling, timezone deltas, travel distance (incl. Oakland/San Diego venues), scoring profiles, stats_player harmonization, projection-row labels, forward roster rows, Vegas implied-total sign, team-code normalization, same-week leakage guards, depth/snap as-of joins, zero-point rows, residual intervals (`tests/test_fixes_2026_09_25.py`).
 
 ## Known gaps
 
-- `implied_team_total` sign: nflverse `spread_line` is positive when the home team is favored, but the feature uses
-  `(total − spread)/2` for home teams, so it's effectively the opponent's implied total (pre-existing; fix pending).
-- Injury designations cover ~18% of skill player-games (healthy players have null status → severity 0); early “Out” tags are sparse vs Questionable.
+- Injury designations cover a minority of player-games; nflverse's current-week report may lag the final Friday designations.
+  Projections set Out/IR (per nflverse) to 0; Questionable/Doubtful are left to the model.
+- 2025+ depth charts are ESPN snapshots and can be stale; 2016–24 weekly charts have no publish timestamp.
 - Schedule `temp`/`wind` missing for a large share of games (domes intentionally nulled; outdoor gaps remain).
-- 2016–2019 rows for relocated teams (OAK/SD/STL abbreviations) miss the schedule join (768 rows).
-- Stadium lat/lon and TZ tables are static approximations.
-- Backup-QB flag is a production heuristic, not depth-chart authoritative; forward projections include every
-  active-roster player (no depth chart), so filter on `n_prior_games_this_season`.
+- Neutral-site games use the home team's stadium for travel; stadium lat/lon and TZ tables are static approximations.
+- `low_80/high_80` are empirical holdout-residual ranges (80% on 2025, ~76% on 2026 wk1–2 out of sample).
 - `nfl-data-py` metadata pins conflict with NumPy 2 / Pandas 2+; runtime works with current wheels on CPython 3.13.
 
 ## ESPN wiring (next steps)
@@ -140,7 +146,7 @@ Dome weather nulling, timezone deltas, travel distance, half-PPR scoring, stats_
 
 1. Map ESPN player IDs ↔ nflverse `player_id` / gsis.
 2. Pull league settings & roster (public endpoints or SWID/`espn_s2`).
-3. Diff league scoring vs `configs/default.yaml`.
+3. League scoring confirmed full PPR (`--scoring ppr`); no TE premium.
 4. Add a roster-filtered start/sit report from `predict`.
 
 ## Data credit
