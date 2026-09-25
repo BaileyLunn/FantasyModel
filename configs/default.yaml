@@ -1,36 +1,46 @@
 # FantasyModel default configuration
 # Documented seasons actually trained: see reports/train_metrics.json after train.
-# Target window 2016–2025; nflverse weekly 2025 returned 404 at build time → used 2016–2024.
+# 2016–2024 weekly: nfl_data_py (legacy player_stats release). 2025+: nflverse stats_player_week
+# release (legacy release 404s from 2025 on). See fantasy_model/sources.py.
 
 seasons:
   target_start: 2016
-  target_end: 2025
+  target_end: 2026
   # Filled/confirmed by fetch_meta.json after scripts/fetch_data.py
   available_start: 2016
-  available_end: 2024
+  available_end: 2026      # 2026 = in-season weeks only (see data/processed/fetch_meta.json)
   sample_years: [2022, 2023, 2024]
 
 scoring:
-  # ESPN half-PPR defaults
-  pass_yd: 0.04          # 1 pt / 25 yards
-  pass_td: 4.0
-  pass_int: -2.0
-  rush_yd: 0.1           # 1 pt / 10 yards
-  rush_td: 6.0
-  rec: 0.5               # half-PPR
-  rec_yd: 0.1
-  rec_td: 6.0
-  fumble_lost: -2.0
-  two_pt: 2.0
-  pass_300_bonus: 0.0
-  rush_100_bonus: 0.0
-  rec_100_bonus: 0.0
+  # Active profile. Override per command with `python -m fantasy_model --scoring ppr ...`.
+  # ESPN league 746996 is confirmed full PPR (1 pt/rec, pass TD 4, no TE premium) -> use `ppr` for it.
+  profile: half_ppr        # half_ppr | ppr | standard
+  base:                    # rules shared by every profile (ESPN defaults)
+    pass_yd: 0.04          # 1 pt / 25 yards
+    pass_td: 4.0
+    pass_int: -2.0
+    rush_yd: 0.1           # 1 pt / 10 yards
+    rush_td: 6.0
+    rec_yd: 0.1
+    rec_td: 6.0
+    fumble_lost: -2.0
+    two_pt: 2.0
+    pass_300_bonus: 0.0
+    rush_100_bonus: 0.0
+    rec_100_bonus: 0.0
+  profiles:
+    half_ppr: {rec: 0.5}
+    ppr: {rec: 1.0}
+    standard: {rec: 0.0}
 
 model:
   backend: hist_gradient_boosting  # hist_gradient_boosting | lightgbm | xgboost
   random_state: 42
-  # Time-based split: train on seasons < test_season, test on test_season
-  test_season: 2024
+  # Time-based split: train on seasons < test_season, test on test_season (validation).
+  # v1 used test_season 2024. Since the 2026-wk2 update: validate on 2025, then refit_full
+  # retrains the production artifact on every labelled row (2016–2025 + current 2026 weeks).
+  test_season: 2025
+  refit_full: true
   rolling_games: 3
   min_train_rows: 50
   max_iter: 300
@@ -54,7 +64,9 @@ features:
   teammates_enabled: true
   baselines_enabled: true
   vegas_enabled: true
+  zero_stat_rows: true     # add snap-count appearances with no offensive stats as 0-point games
+  usage_enabled: true      # depth-chart rank + prior snap share (data/raw/nflverse_extra)
 
 espn:
   league_id: 746996
-  scoring_profile: half_ppr
+  scoring_profile: ppr   # confirmed from ESPN league settings 2026-09-25

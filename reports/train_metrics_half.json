@@ -1,0 +1,172 @@
+{
+  "scoring_profile": "half_ppr",
+  "scoring": {
+    "pass_yd": 0.04,
+    "pass_td": 4.0,
+    "pass_int": -2.0,
+    "rush_yd": 0.1,
+    "rush_td": 6.0,
+    "rec_yd": 0.1,
+    "rec_td": 6.0,
+    "fumble_lost": -2.0,
+    "two_pt": 2.0,
+    "pass_300_bonus": 0.0,
+    "rush_100_bonus": 0.0,
+    "rec_100_bonus": 0.0,
+    "rec": 0.5
+  },
+  "source": "processed:/workspace/FantasyModel/data/processed/player_games.parquet",
+  "split": "train_season_lt_2025",
+  "test_season": 2025,
+  "n_train": 74081,
+  "n_test": 8585,
+  "feature_cols": [
+    "injury_severity",
+    "injury_analog_fp",
+    "injury_analog_delta",
+    "is_indoor_game",
+    "temp_filled",
+    "wind_filled",
+    "temp_missing",
+    "wind_missing",
+    "is_home",
+    "travel_miles",
+    "tz_vs_home",
+    "tz_vs_prev_game",
+    "team_qb_fp_roll",
+    "is_backup_qb_game",
+    "team_target_share",
+    "team_rush_share",
+    "rest_days",
+    "fp_roll",
+    "fp_season_avg",
+    "opp_pos_fp_allowed",
+    "implied_team_total",
+    "spread_line",
+    "total_line",
+    "targets_roll",
+    "carries_roll",
+    "rec_roll",
+    "depth_rank_filled",
+    "depth_listed",
+    "snap_pct_last",
+    "snap_pct_roll3",
+    "snap_pct_season",
+    "snap_games_season",
+    "has_snap_history",
+    "position_code"
+  ],
+  "seasons_in_data": [
+    2016,
+    2017,
+    2018,
+    2019,
+    2020,
+    2021,
+    2022,
+    2023,
+    2024,
+    2025,
+    2026
+  ],
+  "mae": 3.072161699981617,
+  "rmse": 4.773406757481932,
+  "r2": 0.5117565045671116,
+  "mean_actual": 4.5661549213744905,
+  "mean_pred": 4.668868075673625,
+  "stats_rows_only": {
+    "n": 5285,
+    "mae": 4.161961541068286,
+    "rmse": 5.857212123161689,
+    "r2": 0.37236108070674734,
+    "by_position": {
+      "QB": {
+        "n": 664,
+        "mae": 6.025441744061302,
+        "rmse": 7.87506539489919,
+        "r2": 0.29527580766293904
+      },
+      "RB": {
+        "n": 1360,
+        "mae": 4.391389750446006,
+        "rmse": 6.205510437904944,
+        "r2": 0.3601108099169281
+      },
+      "TE": {
+        "n": 1127,
+        "mae": 3.120444557166798,
+        "rmse": 4.646501719673531,
+        "r2": 0.222532490801589
+      },
+      "WR": {
+        "n": 2134,
+        "mae": 3.9859617384984247,
+        "rmse": 5.451920366094635,
+        "r2": 0.2590734515875317
+      }
+    },
+    "note": "excludes zero-stat snap-count appearances; comparable to earlier panels"
+  },
+  "zero_stat_rows_in_test": 3300,
+  "by_position": {
+    "QB": {
+      "n": 1359,
+      "mae": 3.732038736161675,
+      "rmse": 5.824920622360913,
+      "r2": 0.6123435716569596
+    },
+    "RB": {
+      "n": 2024,
+      "mae": 3.3593780900768495,
+      "rmse": 5.192687102070118,
+      "r2": 0.5039835563047494
+    },
+    "TE": {
+      "n": 1959,
+      "mae": 2.2487628411758305,
+      "rmse": 3.6622006433838155,
+      "r2": 0.400950151734491
+    },
+    "WR": {
+      "n": 3243,
+      "mae": 3.113771166117628,
+      "rmse": 4.60106365583387,
+      "r2": 0.40776414669122174
+    }
+  },
+  "train_seasons": [
+    2016,
+    2017,
+    2018,
+    2019,
+    2020,
+    2021,
+    2022,
+    2023,
+    2024
+  ],
+  "interval_holdout_coverage": 0.7996505532906232,
+  "validation_model_path": "/workspace/FantasyModel/models/fantasy_hgb_half_val.joblib",
+  "refit_full": {
+    "n_train": 83685,
+    "train_seasons": [
+      2016,
+      2017,
+      2018,
+      2019,
+      2020,
+      2021,
+      2022,
+      2023,
+      2024,
+      2025,
+      2026
+    ],
+    "last_season_weeks": [
+      1,
+      2
+    ],
+    "note": "production artifact refit on all labelled rows; holdout metrics above come from the validation model"
+  },
+  "model_path": "/workspace/FantasyModel/models/fantasy_hgb_half.joblib"
+}

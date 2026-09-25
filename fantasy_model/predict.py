@@ -10,7 +10,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from fantasy_model.config import load_config, scoring_dict
+from fantasy_model.config import load_config, model_path as default_model_path, profile_tag, scoring_dict
 from fantasy_model.data import load_player_games
 from fantasy_model.features.pipeline import build_feature_matrix
 
@@ -26,8 +26,7 @@ def predict_week(
 ) -> pd.DataFrame:
     cfg = cfg or load_config(config_path)
     scoring = scoring_dict(cfg)
-    models_dir = Path(cfg["paths"]["models_dir"])
-    path = Path(model_path) if model_path else models_dir / "fantasy_hgb.joblib"
+    path = Path(model_path) if model_path else default_model_path(cfg)
     if not path.exists():
         raise FileNotFoundError(f"No model at {path}; run train first")
 
@@ -71,7 +70,7 @@ def predict_week(
     result = out[keep].sort_values("predicted_fp", ascending=False)
     reports_dir = Path(cfg["paths"]["reports_dir"])
     reports_dir.mkdir(parents=True, exist_ok=True)
-    tag = f"{season}_w{week}" + (f"_{player.replace(' ', '_')}" if player else "")
+    tag = f"{season}_w{week}_{profile_tag(cfg)}" + (f"_{player.replace(' ', '_')}" if player else "")
     out_path = reports_dir / f"predict_{tag}.csv"
     result.to_csv(out_path, index=False)
     return result

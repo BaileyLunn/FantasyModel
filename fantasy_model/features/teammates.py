@@ -22,21 +22,21 @@ def add_teammate_features(df: pd.DataFrame, rolling_games: int = 3) -> pd.DataFr
     sort_cols = [c for c in ("season", "week", "_row_id") if c in out.columns]
     out = out.sort_values(sort_cols)
 
-    # Team QB rolling FP from prior games only
+    # Team QB rolling FP from prior team games only. Aggregate to one value per team-week (the
+    # top QB's points) BEFORE shifting: the old row-wise shift let the 2nd QB row of a team-week
+    # (and hence every skill player's mean) see the other QB's same-game points.
     out["team_qb_fp_roll"] = 0.0
     if "position" in out.columns and "fantasy_points" in out.columns:
         qb_mask = out["position"].astype(str).str.upper().eq("QB")
         qb = out.loc[qb_mask].copy()
-        if not qb.empty:
-            qb["qb_fp_prev"] = qb.groupby(team_col)["fantasy_points"].shift(1)
-            group_keys = [c for c in (team_col, "season", "week") if c in qb.columns]
-            qb_roll = (
-                qb.groupby(group_keys, as_index=False)["qb_fp_prev"]
-                .mean()
-                .rename(columns={"qb_fp_prev": "team_qb_fp_roll"})
+        group_keys = [c for c in (team_col, "season", "week") if c in qb.columns]
+        if not qb.empty and len(group_keys) == 3:
+            tw = qb.groupby(group_keys, as_index=False)["fantasy_points"].max().sort_values(["season", "week"])
+            tw["team_qb_fp_roll"] = tw.groupby(team_col)["fantasy_points"].transform(
+                lambda s: s.shift(1).rolling(rolling_games, min_periods=1).mean()
             )
             out = out.drop(columns=["team_qb_fp_roll"], errors="ignore")
-            out = out.merge(qb_roll, on=group_keys, how="left")
+            out = out.merge(tw[group_keys + ["team_qb_fp_roll"]], on=group_keys, how="left")
     out["team_qb_fp_roll"] = out["team_qb_fp_roll"].fillna(0.0)
 
     # Backup QB heuristic from prior week team QB production

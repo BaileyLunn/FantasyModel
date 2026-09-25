@@ -1,0 +1,123 @@
+{
+  "source": "processed:/workspace/FantasyModel/data/processed/player_games.parquet",
+  "model_path": "/workspace/FantasyModel/models/fantasy_hgb_val.joblib",
+  "test_season": 2025,
+  "n": 5285,
+  "mae": 4.380682959974642,
+  "rmse": 5.904143378585494,
+  "r2": 0.3622627983479694,
+  "by_position": {
+    "QB": {
+      "n": 664,
+      "mae": 6.429556108930183,
+      "rmse": 7.920928823469973
+    },
+    "RB": {
+      "n": 1360,
+      "mae": 4.583362490210635,
+      "rmse": 6.303257704319322
+    },
+    "TE": {
+      "n": 1127,
+      "mae": 3.3365074414845135,
+      "rmse": 4.631105377877237
+    },
+    "WR": {
+      "n": 2134,
+      "mae": 4.1654486007014215,
+      "rmse": 5.491924422273565
+    }
+  },
+  "note": "production model is refit on all data; holdout scored with validation model",
+  "train_metrics_cached": {
+    "source": "processed:/workspace/FantasyModel/data/processed/player_games.parquet",
+    "split": "train_season_lt_2025",
+    "test_season": 2025,
+    "n_train": 45715,
+    "n_test": 5285,
+    "feature_cols": [
+      "injury_severity",
+      "injury_analog_fp",
+      "injury_analog_delta",
+      "is_indoor_game",
+      "temp_filled",
+      "wind_filled",
+      "temp_missing",
+      "wind_missing",
+      "is_home",
+      "travel_miles",
+      "tz_vs_home",
+      "tz_vs_prev_game",
+      "team_qb_fp_roll",
+      "is_backup_qb_game",
+      "team_target_share",
+      "team_rush_share",
+      "rest_days",
+      "fp_roll",
+      "fp_season_avg",
+      "opp_pos_fp_allowed",
+      "implied_team_total",
+      "spread_line",
+      "total_line",
+      "targets_roll",
+      "carries_roll",
+      "rec_roll",
+      "position_code"
+    ],
+    "seasons_in_data": [
+      2016,
+      2017,
+      2018,
+      2019,
+      2020,
+      2021,
+      2022,
+      2023,
+      2024,
+      2025,
+      2026
+    ],
+    "mae": 4.380682959974642,
+    "rmse": 5.904143378585494,
+    "r2": 0.3622627983479694,
+    "mean_actual": 7.417301797540208,
+    "mean_pred": 7.635434905704132,
+    "by_position": {
+      "QB": {
+        "n": 664,
+        "mae": 6.429556108930183,
+        "rmse": 7.920928823469973,
+        "r2": 0.28704344817722327
+      },
+      "RB": {
+        "n": 1360,
+        "mae": 4.583362490210635,
+        "rmse": 6.303257704319322,
+        "r2": 0.33979337318196845
+      },
+      "TE": {
+        "n": 1127,
+        "mae": 3.3365074414845135,
+        "rmse": 4.631105377877237,
+        "r2": 0.22767628476487622
+      },
+      "WR": {
+        "n": 2134,
+        "mae": 4.1654486007014215,
+        "rmse": 5.491924422273565,
+        "r2": 0.24816030213872797
+      }
+    },
+    "train_seasons": [
+      2016,
+      2017,
+      2018,
+      2019,
+      2020,
+      2021,
+      2022,
+      2023,
+      2024
+    ]
+  }
+}

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from fantasy_model.features.history import prior_weeks_mean
+
 # Coarse status codes used in practice reports / nflverse injury feeds.
 # Higher = less likely to produce fantasy points. Statistical only.
 STATUS_SEVERITY = {
@@ -76,15 +78,11 @@ def add_injury_features(df: pd.DataFrame) -> pd.DataFrame:
     else:
         out["injury_type_norm"] = ""
 
-    if "fantasy_points" in out.columns and "position" in out.columns:
-        sort_cols = [c for c in ("season", "week", "_row_id") if c in out.columns]
-        tmp = out.sort_values(sort_cols) if sort_cols else out
-        group_keys = ["position", "injury_severity"]
-        g = tmp.groupby(group_keys, dropna=False)["fantasy_points"]
-        analog = g.transform(lambda s: s.shift(1).expanding(min_periods=3).mean())
-        out.loc[tmp.index, "injury_analog_fp"] = analog
-        overall = tmp["fantasy_points"].shift(1).expanding(min_periods=10).mean()
-        out.loc[tmp.index, "injury_analog_delta"] = out.loc[tmp.index, "injury_analog_fp"] - overall
+    if "fantasy_points" in out.columns and "position" in out.columns and {"season", "week"} <= set(out.columns):
+        # Prior-WEEKS means (row-wise shift leaked same-week outcomes of other players in the group)
+        out["injury_analog_fp"] = prior_weeks_mean(out, ["position", "injury_severity"], "fantasy_points", min_count=3)
+        overall = prior_weeks_mean(out, [], "fantasy_points", min_count=10)
+        out["injury_analog_delta"] = out["injury_analog_fp"] - overall
         out["injury_analog_fp"] = out["injury_analog_fp"].fillna(0.0)
         out["injury_analog_delta"] = out["injury_analog_delta"].fillna(0.0)
     else:

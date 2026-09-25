@@ -7,6 +7,7 @@ data/processed/
 # Models & reports artifacts (keep sample reports optional)
 models/*.joblib
 models/*.pkl
+models/validation/
 !models/.gitkeep
 # Ignore bulky prediction dumps; keep metrics docs
 reports/*.csv
@@ -14,6 +15,11 @@ reports/*.csv
 !reports/SEASONS_USED.md
 !reports/eval_report.json
 !reports/train_metrics.json
+!reports/train_metrics_*.json
+!reports/eval_report_*.json
+!reports/validation_*.json
+!reports/projections_2026_w3_half.csv
+!reports/projections_2026_w3_ppr.csv
 
 # Python
 __pycache__/
