@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""Fetch nflverse weekly + schedules into data/raw and build data/processed/player_games.
+"""Fetch nflverse weekly stats, schedules, injuries into data/raw and build data/processed/player_games.
 
-Target seasons: 2016–2025 (inclusive) from config. Missing years are skipped with a note.
+Raw files are combined across seasons (``weekly.csv``, ``schedules.csv``, ``injuries.csv``).
+Only the seasons being (re)downloaded are replaced; other seasons already on disk are kept,
+so an in-season refresh only needs the current season.
+
+Weekly source per season: ``nfl_data_py.import_weekly_data`` (legacy ``player_stats`` release,
+2016–2024) with automatic fallback to nflverse ``stats_player/stats_player_week_{season}``
+(2025+; the legacy release 404s). See ``fantasy_model/sources.py``.
 
 Usage:
-  python scripts/fetch_data.py
-  python scripts/fetch_data.py --seasons 2022 2023 2024
-  python scripts/fetch_data.py --max-seasons 3   # quick subset from recent years
+  python scripts/fetch_data.py --seasons 2016 ... 2026
+  python scripts/fetch_data.py --seasons 2016 ... 2026 --refresh-seasons 2026        # in-season update
+  python scripts/fetch_data.py --seasons 2016 ... 2026 --skip-download               # rebuild panel only
+  python scripts/fetch_data.py --seasons 2016 ... 2026 --skip-download --max-week 2026:2   # as-of build
 """
 
 from __future__ import annotations
@@ -22,20 +29,47 @@ sys.path.insert(0, str(ROOT))
 import pandas as pd
 
 from fantasy_model.config import load_config, scoring_dict
-from fantasy_model.scoring import ensure_fantasy_points
+from fantasy_model.panel import build_panel
+from fantasy_model import sources
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Fetch nflverse fantasy panel")
     p.add_argument("--config", default=None)
-    p.add_argument("--seasons", nargs="*", type=int, default=None)
+    p.add_argument("--seasons", nargs="*", type=int, default=None, help="Seasons to include in the panel")
     p.add_argument("--max-seasons", type=int, default=None, help="Keep only the N most recent requested seasons")
     p.add_argument("--skip-download", action="store_true", help="Rebuild processed from existing raw CSVs")
-    return p.parse_args()
+    p.add_argument(
+        "--refresh-seasons", nargs="*", type=int, default=None,
+        help="Seasons to (re)download; default = all --seasons. Others are read from existing raw files.",
+    )
+    p.add_argument(
+        "--max-week", action="append", default=[], metavar="SEASON:WEEK",
+        help="Cap a season at WEEK (as-of builds / reproducible in-season snapshots). Repeatable.",
+    )
+    p.add_argument("--weekly-source", default="auto", choices=["auto", "nfl_data_py", "stats_player"])
+    return p.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def _replace_seasons(existing_path: Path, new: pd.DataFrame, seasons: list[int]) -> pd.DataFrame:
+    if existing_path.exists():
+        old = pd.read_csv(existing_path, low_memory=False)
+        if "season" in old.columns:
+            old = old[~pd.to_numeric(old["season"], errors="coerce").isin(seasons)]
+        return pd.concat([old, new], ignore_index=True, sort=False)
+    return new
+
+
+def parse_max_week(specs: list[str]) -> dict[int, int]:
+    caps: dict[int, int] = {}
+    for spec in specs:
+        s, w = spec.split(":")
+        caps[int(s)] = int(w)
+    return caps
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     cfg = load_config(args.config)
     raw_dir = Path(cfg["paths"]["raw_dir"])
     processed_dir = Path(cfg["paths"]["processed_dir"])
@@ -47,141 +81,71 @@ def main() -> int:
     seasons = args.seasons or list(range(start, end + 1))
     if args.max_seasons:
         seasons = sorted(seasons)[-args.max_seasons :]
+    refresh = [] if args.skip_download else (args.refresh_seasons if args.refresh_seasons is not None else seasons)
+    caps = parse_max_week(args.max_week)
 
     weekly_path = raw_dir / "weekly.csv"
     schedules_path = raw_dir / "schedules.csv"
-    meta = {"requested_seasons": seasons, "downloaded_seasons": [], "errors": []}
+    inj_path = raw_dir / "injuries.csv"
+    meta: dict = {
+        "requested_seasons": seasons,
+        "refreshed_seasons": refresh,
+        "downloaded_seasons": [],
+        "weekly_sources": {},
+        "max_week": {str(k): v for k, v in caps.items()},
+        "errors": [],
+    }
 
-    if not args.skip_download:
-        try:
-            import nfl_data_py as nfl
-        except ImportError:
-            print("nfl_data_py not installed. pip install nfl-data-py", file=sys.stderr)
-            return 1
+    if refresh:
+        frames = []
+        for y in refresh:
+            try:
+                df, src = sources.load_weekly_season(y, prefer=args.weekly_source)
+                frames.append(df)
+                meta["downloaded_seasons"].append(y)
+                meta["weekly_sources"][str(y)] = src
+                print(f"  weekly {y}: rows={len(df)} via {src}")
+            except Exception as e:  # noqa: BLE001
+                meta["errors"].append(f"weekly {y}: {e}")
+                print(f"Weekly {y} unavailable: {e}", file=sys.stderr)
+        if frames:
+            got = meta["downloaded_seasons"]
+            weekly_all = _replace_seasons(weekly_path, pd.concat(frames, ignore_index=True, sort=False), got)
+            weekly_all.to_csv(weekly_path, index=False)
 
-        print(f"Fetching weekly data for seasons {seasons} ...")
         try:
-            weekly = nfl.import_weekly_data(seasons)
-            weekly.to_csv(weekly_path, index=False)
-            meta["downloaded_seasons"] = sorted(map(int, weekly["season"].dropna().unique()))
-            print(f"  weekly rows={len(weekly)} -> {weekly_path}")
-        except Exception as e:  # noqa: BLE001
-            meta["errors"].append(f"weekly: {e}")
-            print(f"Weekly fetch failed: {e}", file=sys.stderr)
-            if not weekly_path.exists():
-                return 1
-
-        print(f"Fetching schedules for seasons {seasons} ...")
-        try:
-            schedules = nfl.import_schedules(seasons)
-            schedules.to_csv(schedules_path, index=False)
-            print(f"  schedules rows={len(schedules)} -> {schedules_path}")
+            sched = sources.load_schedules(refresh)
+            _replace_seasons(schedules_path, sched, refresh).to_csv(schedules_path, index=False)
+            print(f"  schedules rows={len(sched)} for {refresh}")
         except Exception as e:  # noqa: BLE001
             meta["errors"].append(f"schedules: {e}")
             print(f"Schedules fetch failed: {e}", file=sys.stderr)
 
-        # Optional injuries (may be incomplete historically)
-        try:
-            injuries = nfl.import_injuries(seasons)
-            inj_path = raw_dir / "injuries.csv"
-            injuries.to_csv(inj_path, index=False)
-            print(f"  injuries rows={len(injuries)} -> {inj_path}")
-        except Exception as e:  # noqa: BLE001
-            meta["errors"].append(f"injuries: {e}")
-            print(f"Injuries fetch skipped/failed: {e}")
+        inj_frames = []
+        for y in refresh:
+            try:
+                inj_frames.append(sources.load_injuries_season(y))
+            except Exception as e:  # noqa: BLE001
+                meta["errors"].append(f"injuries {y}: {e}")
+                print(f"Injuries {y} skipped: {e}")
+        if inj_frames:
+            inj_new = pd.concat(inj_frames, ignore_index=True, sort=False)
+            inj_seasons = sorted(map(int, inj_new["season"].dropna().unique()))
+            _replace_seasons(inj_path, inj_new, inj_seasons).to_csv(inj_path, index=False)
+            print(f"  injuries rows={len(inj_new)} for {inj_seasons}")
 
     if not weekly_path.exists():
         print("No weekly.csv present", file=sys.stderr)
         return 1
 
-    weekly = pd.read_csv(weekly_path)
-    if schedules_path.exists():
-        schedules = pd.read_csv(schedules_path)
-    else:
-        schedules = pd.DataFrame()
+    weekly = pd.read_csv(weekly_path, low_memory=False)
+    weekly = weekly[pd.to_numeric(weekly["season"], errors="coerce").isin(seasons)]
+    for s, w in caps.items():
+        weekly = weekly[~((weekly["season"] == s) & (pd.to_numeric(weekly["week"], errors="coerce") > w))]
+    schedules = pd.read_csv(schedules_path, low_memory=False) if schedules_path.exists() else pd.DataFrame()
+    injuries = pd.read_csv(inj_path, low_memory=False) if inj_path.exists() else None
 
-    # Normalize join keys
-    if "recent_team" in weekly.columns and "team" not in weekly.columns:
-        weekly = weekly.rename(columns={"recent_team": "team"})
-    if "player_display_name" in weekly.columns and "player_name" not in weekly.columns:
-        weekly["player_name"] = weekly["player_display_name"]
-
-    if not schedules.empty:
-        sched_cols = [
-            c
-            for c in (
-                "game_id", "season", "week", "gameday", "home_team", "away_team",
-                "roof", "temp", "wind", "spread_line", "total_line",
-                "home_moneyline", "away_moneyline",
-            )
-            if c in schedules.columns
-        ]
-        sched = schedules[sched_cols].drop_duplicates()
-        # Join weekly to schedule on season/week + team in {home, away}
-        # Prefer game_id if weekly has it
-        if "game_id" in weekly.columns and "game_id" in sched.columns:
-            panel = weekly.merge(sched, on="game_id", how="left", suffixes=("", "_sched"))
-            # Fill season/week if duplicated
-            for c in ("season", "week"):
-                if f"{c}_sched" in panel.columns:
-                    panel[c] = panel[c].fillna(panel[f"{c}_sched"])
-                    panel = panel.drop(columns=[f"{c}_sched"])
-        else:
-            home = sched.copy()
-            away = sched.copy()
-            home["team"] = home["home_team"]
-            away["team"] = away["away_team"]
-            team_sched = pd.concat([home, away], ignore_index=True)
-            keys = [c for c in ("season", "week", "team") if c in weekly.columns and c in team_sched.columns]
-            panel = weekly.merge(team_sched, on=keys, how="left", suffixes=("", "_sched"))
-    else:
-        panel = weekly
-
-    # Injuries merge (best-effort)
-    inj_path = raw_dir / "injuries.csv"
-    if inj_path.exists():
-        inj = pd.read_csv(inj_path)
-        id_left = "player_id" if "player_id" in panel.columns else None
-        id_right = "gsis_id" if "gsis_id" in inj.columns else ("player_id" if "player_id" in inj.columns else None)
-        if id_left and id_right:
-            cols = [id_right]
-            for c in (
-                "season", "week", "report_status", "report_primary_injury",
-                "practice_status", "practice_primary_injury",
-                "injury_status", "injury_type",
-            ):
-                if c in inj.columns and c not in cols:
-                    cols.append(c)
-            inj2 = inj[cols].copy()
-            if id_right != id_left:
-                inj2 = inj2.rename(columns={id_right: id_left})
-            for c in ("season", "week"):
-                if c in inj2.columns:
-                    inj2[c] = pd.to_numeric(inj2[c], errors="coerce")
-                if c in panel.columns:
-                    panel[c] = pd.to_numeric(panel[c], errors="coerce")
-            # Prefer official report_status; fall back to practice designation
-            if "report_status" in inj2.columns:
-                inj2["injury_status"] = inj2["report_status"]
-            if "injury_status" in inj2.columns and "practice_status" in inj2.columns:
-                inj2["injury_status"] = inj2["injury_status"].fillna(inj2["practice_status"])
-            if "report_primary_injury" in inj2.columns:
-                inj2["injury_type"] = inj2["report_primary_injury"]
-            if "injury_type" in inj2.columns and "practice_primary_injury" in inj2.columns:
-                inj2["injury_type"] = inj2["injury_type"].fillna(inj2["practice_primary_injury"])
-            keep = [c for c in (id_left, "season", "week", "injury_status", "injury_type") if c in inj2.columns]
-            inj2 = inj2[keep].drop_duplicates([c for c in (id_left, "season", "week") if c in keep])
-            merge_keys = [c for c in (id_left, "season", "week") if c in panel.columns and c in inj2.columns]
-            panel = panel.merge(inj2, on=merge_keys, how="left")
-
-    scoring = scoring_dict(cfg)
-    panel = ensure_fantasy_points(panel, scoring)
-
-    # Keep skill + QB; regular season only (playoff rest/travel differ)
-    if "position" in panel.columns:
-        panel = panel[panel["position"].astype(str).str.upper().isin(["QB", "RB", "WR", "TE"])].copy()
-    if "season_type" in panel.columns:
-        panel = panel[panel["season_type"].astype(str).str.upper().eq("REG")].copy()
+    panel = build_panel(weekly, schedules, injuries, scoring_dict(cfg))
 
     out_csv = processed_dir / "player_games.csv"
     panel.to_csv(out_csv, index=False)
@@ -192,6 +156,13 @@ def main() -> int:
 
     meta["n_rows"] = int(len(panel))
     meta["seasons_present"] = sorted(map(int, panel["season"].dropna().unique())) if "season" in panel.columns else []
+    counts = panel.groupby("season").size()
+    meta["rows_per_season"] = {str(int(k)): int(v) for k, v in counts.items()}
+    latest = int(panel["season"].max())
+    wk = panel[panel["season"] == latest].groupby("week").agg(rows=("player_id", "size"), games=("game_id", "nunique"))
+    meta["latest_season_weeks"] = {
+        str(int(w)): {"rows": int(r.rows), "games": int(r.games)} for w, r in wk.iterrows()
+    }
     meta["processed_path"] = str(out_csv)
     (processed_dir / "fetch_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(json.dumps(meta, indent=2))

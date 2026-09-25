@@ -1,9 +1,9 @@
 {
   "source": "processed:/workspace/FantasyModel/data/processed/player_games.parquet",
-  "split": "train_season_lt_2024",
-  "test_season": 2024,
-  "n_train": 40488,
-  "n_test": 5227,
+  "split": "train_season_lt_2025",
+  "test_season": 2025,
+  "n_train": 45715,
+  "n_test": 5285,
   "feature_cols": [
     "injury_severity",
     "injury_analog_fp",
@@ -42,12 +42,73 @@
     2021,
     2022,
     2023,
+    2024,
+    2025,
+    2026
+  ],
+  "mae": 4.380682959974642,
+  "rmse": 5.904143378585494,
+  "r2": 0.3622627983479694,
+  "mean_actual": 7.417301797540208,
+  "mean_pred": 7.635434905704132,
+  "by_position": {
+    "QB": {
+      "n": 664,
+      "mae": 6.429556108930183,
+      "rmse": 7.920928823469973,
+      "r2": 0.28704344817722327
+    },
+    "RB": {
+      "n": 1360,
+      "mae": 4.583362490210635,
+      "rmse": 6.303257704319322,
+      "r2": 0.33979337318196845
+    },
+    "TE": {
+      "n": 1127,
+      "mae": 3.3365074414845135,
+      "rmse": 4.631105377877237,
+      "r2": 0.22767628476487622
+    },
+    "WR": {
+      "n": 2134,
+      "mae": 4.1654486007014215,
+      "rmse": 5.491924422273565,
+      "r2": 0.24816030213872797
+    }
+  },
+  "train_seasons": [
+    2016,
+    2017,
+    2018,
+    2019,
+    2020,
+    2021,
+    2022,
+    2023,
     2024
   ],
-  "mae": 4.397796825397698,
-  "rmse": 5.889753074019866,
-  "r2": 0.3802629484156681,
-  "mean_actual": 7.670235316625215,
-  "mean_pred": 7.68380019225871,
+  "validation_model_path": "/workspace/FantasyModel/models/fantasy_hgb_val.joblib",
+  "refit_full": {
+    "n_train": 51626,
+    "train_seasons": [
+      2016,
+      2017,
+      2018,
+      2019,
+      2020,
+      2021,
+      2022,
+      2023,
+      2024,
+      2025,
+      2026
+    ],
+    "last_season_weeks": [
+      1,
+      2
+    ],
+    "note": "production artifact refit on all labelled rows; holdout metrics above come from the validation model"
+  },
   "model_path": "/workspace/FantasyModel/models/fantasy_hgb.joblib"
 }

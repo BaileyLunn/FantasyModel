@@ -21,10 +21,25 @@ def train_model(
     cfg: dict[str, Any] | None = None,
     prefer_sample: bool = False,
     config_path: str | None = None,
+    test_season: int | None = None,
+    refit_full: bool | None = None,
+    model_out: str | None = None,
+    write_reports: bool = True,
 ) -> dict[str, Any]:
+    """Validate on a held-out season, then (optionally) refit on all labelled rows.
+
+    * Validation: train on seasons < ``test_season``; score ``test_season`` (metrics reported).
+    * ``refit_full`` (config ``model.refit_full``): the saved production artifact is refit on
+      every labelled row (all seasons, incl. the holdout and current in-season weeks) with the
+      same hyper-parameters. The validation-only model is saved alongside as ``*_val.joblib``.
+    """
     cfg = cfg or load_config(config_path)
     scoring = scoring_dict(cfg)
     df, source = load_player_games(cfg, prefer_sample=prefer_sample)
+    df = df.reset_index(drop=True)
+    model_cfg = cfg.get("model", {})
+    if refit_full is None:
+        refit_full = bool(model_cfg.get("refit_full", False))
 
     X_all, y, feature_cols = build_feature_matrix(df, scoring, cfg)
     if y is None:
@@ -35,8 +50,12 @@ def train_model(
         X_all["season"] = df["season"].values
 
     seasons = X_all["season"].to_numpy() if "season" in X_all.columns else df["season"].to_numpy()
-    test_season = int(cfg.get("model", {}).get("test_season", int(np.max(seasons))))
+    if test_season is None:
+        test_season = int(model_cfg.get("test_season", int(np.max(seasons))))
     train_idx, test_idx = time_based_split(seasons, test_season)
+    labelled = y.notna().to_numpy()
+    train_idx = train_idx[labelled[train_idx]]
+    test_idx = test_idx[labelled[test_idx]]
 
     min_rows = int(cfg.get("model", {}).get("min_train_rows", 50))
     if len(train_idx) < min_rows:
@@ -90,8 +109,22 @@ def train_model(
             }
         )
 
+    if len(test_idx) and "position" in df.columns:
+        pos = df.iloc[test_idx]["position"].astype(str).str.upper().to_numpy()
+        metrics["by_position"] = {
+            p: {
+                "n": int((pos == p).sum()),
+                "mae": float(mean_absolute_error(y_test[pos == p], pred[pos == p])),
+                "rmse": float(mean_squared_error(y_test[pos == p], pred[pos == p]) ** 0.5),
+                "r2": float(r2_score(y_test[pos == p], pred[pos == p])),
+            }
+            for p in sorted(np.unique(pos))
+        }
+    metrics["train_seasons"] = sorted(map(int, np.unique(seasons[train_idx])))
+
     models_dir = Path(cfg["paths"]["models_dir"])
     models_dir.mkdir(parents=True, exist_ok=True)
+    out_path = Path(model_out) if model_out else models_dir / "fantasy_hgb.joblib"
     artifact = {
         "model": model,
         "feature_cols": feature_cols,
@@ -100,9 +133,37 @@ def train_model(
         "cfg_model": cfg.get("model", {}),
         "metrics": metrics,
     }
-    out_path = models_dir / "fantasy_hgb.joblib"
+
+    if refit_full and len(test_idx):
+        val_path = out_path.with_name(out_path.stem + "_val" + out_path.suffix)
+        joblib.dump(artifact, val_path)
+        metrics["validation_model_path"] = str(val_path)
+        all_idx = np.where(labelled)[0]
+        X_full_raw = X_all.iloc[all_idx][feature_cols].to_numpy(dtype=float)
+        med_full = np.nanmedian(X_full_raw, axis=0)
+        med_full = np.where(np.isnan(med_full), 0.0, med_full)
+        X_full = X_full_raw.copy()
+        inds = np.where(np.isnan(X_full))
+        X_full[inds] = np.take(med_full, inds[1])
+        full_model = make_model(cfg)
+        full_model.fit(X_full, y.iloc[all_idx].to_numpy(dtype=float))
+        sub = df.iloc[all_idx]
+        last_season = int(sub["season"].max())
+        metrics["refit_full"] = {
+            "n_train": int(len(all_idx)),
+            "train_seasons": sorted(map(int, sub["season"].unique())),
+            "last_season_weeks": sorted(map(int, sub.loc[sub["season"] == last_season, "week"].unique())),
+            "note": "production artifact refit on all labelled rows; holdout metrics above come from the validation model",
+        }
+        artifact = {**artifact, "model": full_model, "impute_medians": med_full, "metrics": metrics}
+    else:
+        metrics["refit_full"] = None
+
     joblib.dump(artifact, out_path)
     metrics["model_path"] = str(out_path)
+
+    if not write_reports:
+        return metrics
 
     reports_dir = Path(cfg["paths"]["reports_dir"])
     reports_dir.mkdir(parents=True, exist_ok=True)

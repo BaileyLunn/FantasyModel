@@ -10,7 +10,7 @@ import pandas as pd
 STAT_COLUMNS = {
     "pass_yd": ["passing_yards", "pass_yds", "pass_yards"],
     "pass_td": ["passing_tds", "pass_td", "pass_tds"],
-    "pass_int": ["interceptions", "pass_int", "ints"],
+    "pass_int": ["interceptions", "passing_interceptions", "pass_int", "ints"],
     "rush_yd": ["rushing_yards", "rush_yds", "rush_yards"],
     "rush_td": ["rushing_tds", "rush_td", "rush_tds"],
     "rec": ["receptions", "rec"],
@@ -95,4 +95,9 @@ def ensure_fantasy_points(df: pd.DataFrame, scoring: Mapping[str, float], col: s
     """Recompute fantasy_points from box-score stats using the configured scoring map."""
     out = df.copy()
     out[col] = fantasy_points(out, scoring)
+    # Forward (not-yet-played) rows have no box score: keep the label missing so that
+    # shifted/expanding features and training never treat them as 0-point games.
+    if "is_projection" in out.columns:
+        proj = pd.to_numeric(out["is_projection"], errors="coerce").fillna(0).astype(bool)
+        out.loc[proj, col] = float("nan")
     return out
