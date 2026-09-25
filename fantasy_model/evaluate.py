@@ -82,6 +82,7 @@ def evaluate_model(
         "r2": float(r2_score(y_true, pred)) if len(np.unique(y_true)) > 1 else None,
         "by_position": by_pos,
         "note": note,
+        "strategy": artifact.get("strategy"),
         "train_metrics_cached": artifact.get("metrics", {}),
     }
     reports_dir = Path(cfg["paths"]["reports_dir"])
@@ -141,6 +142,7 @@ def evaluate_slice(
 
     report: dict[str, Any] = {
         "scoring_profile": artifact.get("scoring_profile"),
+        "strategy": artifact.get("strategy"),
         "model_path": str(path),
         "model_train_seasons": artifact.get("metrics", {}).get("train_seasons")
         or artifact.get("metrics", {}).get("seasons_in_data"),

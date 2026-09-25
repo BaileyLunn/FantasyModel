@@ -83,10 +83,17 @@ def likely_role(position: pd.Series, depth_rank: pd.Series, snap_roll3: pd.Serie
 
 def local_drivers(model, X: np.ndarray, reference: np.ndarray, feature_cols: list[str], top: int = 3) -> list[str]:
     """Per-row top features by single-feature substitution: effect = f(x) - f(x with feature j set to
-    its training median). A cheap local attribution for tree models (NOT SHAP; ignores interactions)."""
+    its training median). A cheap local attribution for tree models (NOT SHAP; ignores interactions).
+    With a per-position router, ``position_code`` is not substituted (that would switch the row to another
+    position's model); each row's drivers come from its own position's model."""
+    from fantasy_model.model import PositionRouterModel
+
+    skip = {"position_code"} if isinstance(model, PositionRouterModel) else set()
     base = model.predict(X)
     effects = np.zeros_like(X, dtype=float)
     for j in range(X.shape[1]):
+        if feature_cols[j] in skip:
+            continue
         Xj = X.copy()
         Xj[:, j] = reference[j]
         effects[:, j] = base - model.predict(Xj)
@@ -175,7 +182,7 @@ def project_week(
     inds = np.where(np.isnan(X))
     X[inds] = np.take(artifact["impute_medians"], inds[1])
     preds = artifact["model"].predict(X)
-    lo, hi = apply_interval(preds, artifact.get("interval"))
+    lo, hi = apply_interval(preds, artifact.get("interval"), out["position"].astype(str).str.upper().to_numpy())
 
     out["model_projection"] = np.round(preds, 2)
     out["low_80"] = np.round(lo, 2)

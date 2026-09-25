@@ -98,3 +98,27 @@ def model_path(cfg: dict[str, Any], validation: bool = False) -> Path:
     """Default artifact path for the active scoring profile, e.g. models/fantasy_hgb_ppr.joblib."""
     d = Path(cfg.get("paths", {}).get("models_dir", project_root() / "models"))
     return d / f"fantasy_hgb_{profile_tag(cfg)}{'_val' if validation else ''}.joblib"
+
+
+def apply_per_position_override(cfg: dict[str, Any], spec: str | None) -> dict[str, Any]:
+    """CLI override of the model strategy: ``none``/``pooled`` -> pooled, ``all`` -> per_position,
+    ``QB,TE`` -> hybrid with those positions separate. Returns a copy (no-op for None)."""
+    if spec is None:
+        return cfg
+    out = dict(cfg)
+    model = dict(cfg.get("model") or {})
+    key = str(spec).strip().lower()
+    positions = ("QB", "RB", "TE", "WR")
+    if key in ("none", "pooled", ""):
+        model["strategy"] = "pooled"
+    elif key == "all":
+        model["strategy"] = "per_position"
+    else:
+        chosen = {p.strip().upper() for p in str(spec).split(",") if p.strip()}
+        bad = chosen - set(positions)
+        if bad:
+            raise ValueError(f"unknown positions {sorted(bad)} in --per-position {spec!r}")
+        model["strategy"] = "hybrid"
+        model["per_position"] = {p: p in chosen for p in positions}
+    out["model"] = model
+    return out

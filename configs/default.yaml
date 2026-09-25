@@ -47,6 +47,23 @@ model:
   max_depth: 6
   learning_rate: 0.06
   min_samples_leaf: 25
+  # Per-position models (2026-09-25, reports/PER_POSITION_2026_09_25.md, scripts/per_position_experiment.py).
+  # strategy: pooled (one model, position_code feature) | per_position (a model per position) |
+  #           hybrid (positions flagged in per_position get their own model; the rest use the pooled one).
+  # Adopted: QB only, with the position-specific features (features.position_specific_enabled). It beat the
+  # pooled model on the 2024 inner validation and on the 2025 holdout beyond seed noise, and did not get worse
+  # on 2026 wk1-2 / the roster backtest beyond seed noise. RB/WR/TE stay pooled.
+  # CLI override: `python -m fantasy_model --per-position none|all|QB,TE train`, update_week.py --per-position.
+  strategy: hybrid
+  per_position: {QB: true, RB: false, WR: false, TE: false}
+  # Hyper-parameters of per-position models (override the pooled ones above). Tuned by time-based CV on
+  # 2021-2023 folds only (never on the 2025/2026 holdouts). Per-profile blocks override the plain entry.
+  position_params:
+    QB: {max_depth: 4, learning_rate: 0.03, min_samples_leaf: 150, max_iter: 300}
+    ppr:
+      QB: {max_depth: 4, learning_rate: 0.03, min_samples_leaf: 60, max_iter: 300}
+    half_ppr:
+      QB: {max_depth: 4, learning_rate: 0.03, min_samples_leaf: 150, max_iter: 300}
 
 training:
   # Recency bias #1: exponential-decay sample weights, w = 0.5 ** (age_in_seasons / half_life), where
@@ -81,6 +98,10 @@ features:
   # snap_pct_ewm is attached at panel build (fetch_data / project), so rebuild the panel after changing it.
   recent_form_enabled: true
   ewm_halflife_games: 5
+  # Position-specific EWMA usage (rush share, rush yds, target share, air-yards share, receiving air yards,
+  # pass attempts, pass air yards; same half-life). Fed ONLY to per-position models (model.per_position);
+  # the pooled model never sees them.
+  position_specific_enabled: true
 
 espn:
   league_id: 746996

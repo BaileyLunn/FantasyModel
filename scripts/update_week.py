@@ -18,6 +18,8 @@ Steps
     Recency bias is ON by default for every profile: training sample weights decay with
     ``training.recency_half_life_seasons`` and the recent-form EWMA features use
     ``features.ewm_halflife_games`` (override with --recency-half-life / --ewm-halflife; 0 = off).
+    Model strategy follows ``model.strategy`` / ``model.per_position`` (default: QB has its own model,
+    RB/WR/TE pooled); ``--per-position none|all|QB,TE`` overrides it for the run.
  4. Project week N+1 -> reports/projections_{S}_w{N+1}_{tag}.csv  (tag = half | ppr | std)
 """
 
@@ -37,8 +39,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import joblib
 
 import fetch_data
-from fantasy_model.config import load_config, model_path, profile_tag, set_scoring_profile
+from fantasy_model.config import apply_per_position_override, load_config, model_path, profile_tag, set_scoring_profile
 from fantasy_model.evaluate import evaluate_slice
+from fantasy_model.model import per_position_flags
 from fantasy_model.project import project_week
 from fantasy_model.train import train_model
 
@@ -73,10 +76,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="Override training.recency_half_life_seasons (0 = uniform weights)")
     p.add_argument("--ewm-halflife", type=float, default=None,
                    help="Override features.ewm_halflife_games (0 = recent-form EWMA features off)")
+    p.add_argument("--per-position", default=None,
+                   help="Override model.strategy for the refit: none | all | e.g. QB,TE (default: config)")
     p.add_argument("--allow-partial", action="store_true", help="Proceed even if some week-N games are not in the stats yet")
     args = p.parse_args(argv)
 
     cfg = apply_recency_overrides(load_config(args.config), args.recency_half_life, args.ewm_halflife)
+    cfg = apply_per_position_override(cfg, args.per_position)
     S, N = args.season, args.week
     seasons = [str(y) for y in range(args.first_season, S + 1)]
     fetch_args = ["--seasons", *seasons, "--max-week", f"{S}:{N}"]
@@ -114,7 +120,8 @@ def main(argv: list[str] | None = None) -> int:
     summary: dict = {"season": S, "week": N, "week_rows": wk_meta, "profiles": {},
                      "recency": {"half_life_seasons": cfg["training"].get("recency_half_life_seasons"),
                                  "ewm_halflife_games": cfg["features"].get("ewm_halflife_games")
-                                 if cfg["features"].get("recent_form_enabled") else None}}
+                                 if cfg["features"].get("recent_form_enabled") else None},
+                     "per_position": per_position_flags(cfg)}
     print(f"recency settings: {summary['recency']}")
     reports = Path(cfg["paths"]["reports_dir"])
     base_cfg = cfg
