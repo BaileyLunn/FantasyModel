@@ -1,6 +1,7 @@
 """In-season update plumbing: source harmonization, projection labels, forward rows."""
 
 import numpy as np
+import pytest
 import pandas as pd
 
 from fantasy_model.project import forward_rows
@@ -60,3 +61,23 @@ def test_forward_rows_active_skill_players_with_opponent():
     assert sorted(out["player_id"]) == ["1", "2"]
     assert dict(zip(out["player_id"], out["opponent_team"])) == {"1": "LAC", "2": "BUF"}
     assert (out["is_projection"] == 1).all()
+
+
+def test_forward_rows_falls_back_to_latest_roster_week_per_team():
+    # Week 6 rosters not published yet: BUF falls back to week 5, KC (bye in week 5) to week 4.
+    roster = pd.DataFrame(
+        [
+            {"season": 2026, "week": 5, "team": "BUF", "position": "QB", "status": "ACT", "gsis_id": "1", "full_name": "A"},
+            {"season": 2026, "week": 4, "team": "BUF", "position": "WR", "status": "ACT", "gsis_id": "2", "full_name": "B"},
+            {"season": 2026, "week": 4, "team": "KC", "position": "TE", "status": "ACT", "gsis_id": "3", "full_name": "C"},
+            {"season": 2026, "week": 4, "team": "KC", "position": "RB", "status": "RES", "gsis_id": "4", "full_name": "D"},
+            {"season": 2026, "week": 1, "team": "NYJ", "position": "RB", "status": "ACT", "gsis_id": "5", "full_name": "E"},
+        ]
+    )
+    sched = pd.DataFrame([{"season": 2026, "week": 6, "home_team": "BUF", "away_team": "KC"},
+                          {"season": 2026, "week": 6, "home_team": "NYJ", "away_team": "NE"}])
+    with pytest.warns(UserWarning, match="weekly roster not published"):
+        out = forward_rows(roster, sched, 2026, 6)
+    assert sorted(out["player_id"]) == ["1", "3"]  # NYJ week-1 roster is too stale (> 3 weeks)
+    assert dict(zip(out["player_id"], out["roster_week"])) == {"1": 5, "3": 4}
+    assert set(out["week"]) == {6}
