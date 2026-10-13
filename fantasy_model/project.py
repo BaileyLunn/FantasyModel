@@ -10,6 +10,7 @@ still predicted from pre-game features; their actual points are attached for com
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,9 @@ def _roster(cfg: dict[str, Any], season: int, refresh: bool) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
-def forward_rows(roster: pd.DataFrame, schedules: pd.DataFrame, season: int, week: int) -> pd.DataFrame:
+def forward_rows(
+    roster: pd.DataFrame, schedules: pd.DataFrame, season: int, week: int, max_roster_lag: int = 3
+) -> pd.DataFrame:
     games = schedules[(schedules["season"] == season) & (schedules["week"] == week)]
     if games.empty:
         raise ValueError(f"no schedule rows for {season} week {week}")
@@ -45,12 +48,24 @@ def forward_rows(roster: pd.DataFrame, schedules: pd.DataFrame, season: int, wee
         opp[h] = a
         opp[a] = h
     roster = roster.assign(team=normalize_team_series(roster["team"]))
+    roster = roster[(roster["season"] == season) & (roster["week"] <= week) & (roster["team"].isin(opp.keys()))]
+    # nflverse publishes week N+1 weekly rosters some time after week N ends (sometimes not until
+    # mid-week). Until then, each team falls back to its most recent published roster week (bye teams
+    # reach back past their bye), at most ``max_roster_lag`` weeks old. ``roster_week`` records which
+    # week was used so stale rows are visible in the output.
+    latest = roster.groupby("team")["week"].max()
+    use_week = latest[latest >= week - max_roster_lag]
+    stale = use_week[use_week < week]
+    if len(stale):
+        warnings.warn(
+            f"{season} week {week}: weekly roster not published for {len(stale)} team(s); using latest "
+            f"roster week instead: {dict(sorted(stale.astype(int).items()))}",
+            stacklevel=2,
+        )
     r = roster[
-        (roster["season"] == season)
-        & (roster["week"] == week)
+        roster["team"].map(use_week).eq(roster["week"])
         & (roster["status"].astype(str).str.upper() == "ACT")
         & (roster["position"].isin(SKILL_POSITIONS))
-        & (roster["team"].isin(opp.keys()))
         & roster["gsis_id"].notna()
     ].drop_duplicates("gsis_id")
     return pd.DataFrame(
@@ -66,6 +81,7 @@ def forward_rows(roster: pd.DataFrame, schedules: pd.DataFrame, season: int, wee
             "week": week,
             "season_type": "REG",
             "is_projection": 1,
+            "roster_week": r["week"].astype(int).to_numpy(),
         }
     )
 
@@ -210,13 +226,15 @@ def project_week(
     out["actual_fp"], game_played = actual_points(out, raw_dir, season, week, scoring)
     out["game_status"] = np.where(game_played, "played", "upcoming")
     out["scoring_profile"] = artifact.get("scoring_profile", profile_tag(cfg))
+    if "roster_week" in out:
+        out["roster_week"] = pd.to_numeric(out["roster_week"], errors="coerce").astype("Int64")
 
     cols = [
         "season", "week", "game_id", "gameday", "player_id", "player_name", "position", "team",
         "opponent_team", "is_home", "spread_line", "total_line", "implied_team_total",
         "depth_rank", "likely_role", "snap_pct_last", "snap_pct_roll3", "snap_pct_season", "snap_pct_ewm",
         "fp_roll", "fp_ewm", "injury_status", "injury_type", "n_prior_games", "n_prior_games_this_season",
-        "projection", "low_80", "high_80", "model_projection", "availability_note",
+        "projection", "low_80", "high_80", "model_projection", "availability_note", "roster_week",
         "game_status", "actual_fp", "scoring_profile", "top_drivers",
     ]
     result = out[[c for c in cols if c in out.columns]].sort_values("projection", ascending=False)
